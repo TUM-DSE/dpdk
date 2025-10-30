@@ -11,6 +11,7 @@ all_examples = [
         'bbdev_app',
         'bond',
         'cmdline',
+        'cvm_shared',
         'distributor',
         'dma',
         'ethtool',
