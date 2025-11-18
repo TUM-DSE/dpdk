@@ -267,10 +267,14 @@ handle_alloc_request(const struct malloc_mp_req *m,
 			ar->flags, ar->align, ar->bound, ar->contig, ms,
 			n_segs);
 
+	EAL_LOG(DEBUG, "handle_alloc_request: alloc_pages_on_heap returned elem=%p", elem);
+
 	if (elem == NULL)
 		goto fail;
 
+	EAL_LOG(DEBUG, "handle_alloc_request: About to access ms[0] at %p", ms[0]);
 	map_addr = ms[0]->addr;
+	EAL_LOG(DEBUG, "handle_alloc_request: Successfully read ms[0]->addr = %p", map_addr);
 
 	eal_memalloc_mem_event_notify(RTE_MEM_EVENT_ALLOC, map_addr, alloc_sz);
 

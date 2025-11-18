@@ -327,18 +327,30 @@ virt2memseg_list(const void *addr)
 	struct rte_memseg_list *msl;
 	int msl_idx;
 
+	EAL_LOG(DEBUG, "virt2memseg_list: Looking up address %p", addr);
+
+	/* First, search regular memsegs */
+	EAL_LOG(DEBUG, "virt2memseg_list: Searching regular memsegs");
 	for (msl_idx = 0; msl_idx < RTE_MAX_MEMSEG_LISTS; msl_idx++) {
 		void *start, *end;
 		msl = &mcfg->memsegs[msl_idx];
 
 		start = msl->base_va;
 		end = RTE_PTR_ADD(start, msl->len);
+		
+		if (msl->base_va != NULL) {
+			EAL_LOG(DEBUG, "virt2memseg_list: Regular memseg[%d]: base_va=%p, len=%zu, range=[%p, %p)",
+				msl_idx, start, msl->len, start, end);
+		}
+		
 		if (addr >= start && addr < end) {
+			EAL_LOG(DEBUG, "virt2memseg_list: Found in regular memseg[%d]", msl_idx);
 			return msl;
 		}
 	}
 
 	/* If not found in regular memsegs, search CVM shared memsegs */
+	EAL_LOG(DEBUG, "virt2memseg_list: Not found in regular memsegs, searching CVM shared memsegs");
 	for (msl_idx = 0; msl_idx < RTE_MAX_MEMSEG_LISTS; msl_idx++) {
 		void *start, *end;
 		msl = &mcfg->cvm_shared_memsegs[msl_idx];
@@ -358,6 +370,7 @@ virt2memseg_list(const void *addr)
 	}
 
 	/* Not found in either array */
+	EAL_LOG(DEBUG, "virt2memseg_list: Address %p not found in any memseg list", addr);
 	return NULL;
 }
 

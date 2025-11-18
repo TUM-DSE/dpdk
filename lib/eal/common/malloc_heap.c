@@ -111,6 +111,7 @@ get_heap_memory_type(const struct malloc_heap *heap, const struct rte_mem_config
 		return RTE_MEMORY_TYPE_NORMAL;
 
 	/* Heap pointer is not in either valid array - log error and return safe default */
+	EAL_LOG(ERR, "Invalid heap pointer %p: not in malloc_heaps or cvm_shared_malloc_heaps arrays", heap);
 	return RTE_MEMORY_TYPE_NORMAL;
 }
 
@@ -398,6 +399,10 @@ alloc_pages_on_heap(struct malloc_heap *heap, uint64_t pg_sz, size_t elt_size,
 	/* Determine if this heap is a CVM shared heap */
 	mem_type = get_heap_memory_type(heap, mcfg);
 
+	EAL_LOG(DEBUG, "Allocating %zu pages of size %"PRIu64" on socket %d (%s heap)",
+		(size_t)n_segs, pg_sz, socket, (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "CVM shared" : "regular");
+
+
 	allocd_pages = eal_memalloc_alloc_seg_bulk(ms, n_segs, pg_sz, socket, true, mem_type);
 
 	/* make sure we've allocated our pages... */
@@ -487,15 +492,26 @@ try_expand_heap_primary(struct malloc_heap *heap, uint64_t pg_sz,
 	int n_segs;
 	bool callback_triggered = false;
 
+	EAL_LOG(DEBUG, "try_expand_heap_primary: Entry - elt_size=%zu, pg_sz=%"PRIu64", socket=%d, align=%zu, contig=%d",
+			elt_size, pg_sz, socket, align, contig);
+
 	alloc_sz = RTE_ALIGN_CEIL(RTE_ALIGN_CEIL(elt_size, align) +
 			MALLOC_ELEM_OVERHEAD, pg_sz);
 	n_segs = alloc_sz / pg_sz;
 
+	EAL_LOG(DEBUG, "try_expand_heap_primary: Calculated alloc_sz=%zu (%zuMB), n_segs=%d, malloc size=%zu bytes",
+			alloc_sz, alloc_sz >> 20, n_segs, sizeof(*ms) * n_segs);
+
 	/* we can't know in advance how many pages we'll need, so we malloc */
 	ms = malloc(sizeof(*ms) * n_segs);
-	if (ms == NULL)
+	if (ms == NULL) {
+		EAL_LOG(ERR, "try_expand_heap_primary: malloc failed for %zu bytes (need %d memseg pointers)",
+				sizeof(*ms) * n_segs, n_segs);
 		return -1;
+	}
+	EAL_LOG(DEBUG, "try_expand_heap_primary: malloc succeeded, ms=%p", ms);
 	memset(ms, 0, sizeof(*ms) * n_segs);
+	EAL_LOG(DEBUG, "try_expand_heap_primary: memset completed");
 
 	elem = alloc_pages_on_heap(heap, pg_sz, elt_size, socket, flags, align,
 			bound, contig, ms, n_segs);
@@ -503,7 +519,9 @@ try_expand_heap_primary(struct malloc_heap *heap, uint64_t pg_sz,
 	if (elem == NULL)
 		goto free_ms;
 
+	EAL_LOG(DEBUG, "try_expand_heap_primary: elem=%p, about to access ms[0] at %p", elem, ms[0]);
 	map_addr = ms[0]->addr;
+	EAL_LOG(DEBUG, "try_expand_heap_primary: Successfully read ms[0]->addr = %p", map_addr);
 
 	/* notify user about changes in memory map */
 	eal_memalloc_mem_event_notify(RTE_MEM_EVENT_ALLOC, map_addr, alloc_sz);
@@ -528,7 +546,9 @@ try_expand_heap_primary(struct malloc_heap *heap, uint64_t pg_sz,
 	EAL_LOG(DEBUG, "Heap on socket %d was expanded by %zdMB",
 		socket, alloc_sz >> 20ULL);
 
+	EAL_LOG(DEBUG, "malloc_heap: About to free(ms) at %p", ms);
 	free(ms);
+	EAL_LOG(DEBUG, "malloc_heap: Freed ms successfully, returning elem=%p", elem);
 
 	return 0;
 
@@ -588,14 +608,18 @@ try_expand_heap(struct malloc_heap *heap, uint64_t pg_sz, size_t elt_size,
 	rte_mcfg_mem_write_lock();
 
 	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+		EAL_LOG(DEBUG, "try_expand_heap: About to call try_expand_heap_primary");
 		ret = try_expand_heap_primary(heap, pg_sz, elt_size, socket,
 				flags, align, bound, contig);
+		EAL_LOG(DEBUG, "try_expand_heap: Returned from try_expand_heap_primary with ret=%d", ret);
 	} else {
 		ret = try_expand_heap_secondary(heap, pg_sz, elt_size, socket,
 				flags, align, bound, contig);
 	}
 
+	EAL_LOG(DEBUG, "try_expand_heap: About to call rte_mcfg_mem_write_unlock()");
 	rte_mcfg_mem_write_unlock();
+	EAL_LOG(DEBUG, "try_expand_heap: Returned from rte_mcfg_mem_write_unlock()");
 	return ret;
 }
 
@@ -703,9 +727,13 @@ alloc_more_mem_on_socket(struct malloc_heap *heap, size_t size, int socket,
 		 * do not pass the size hint here, as user expects other page
 		 * sizes first, before resorting to best effort allocation.
 		 */
+		EAL_LOG(DEBUG, "alloc_more_mem_on_socket: Calling try_expand_heap (requested, attempt %d)", i);
 		if (!try_expand_heap(heap, pg_sz, size, socket, size_flags,
-				align, bound, contig))
+				align, bound, contig)) {
+			EAL_LOG(DEBUG, "alloc_more_mem_on_socket: try_expand_heap succeeded, returning 0");
 			return 0;
+		}
+		EAL_LOG(DEBUG, "alloc_more_mem_on_socket: try_expand_heap failed, continuing");
 	}
 	if (n_other_pg_sz == 0)
 		return -1;
@@ -722,9 +750,13 @@ alloc_more_mem_on_socket(struct malloc_heap *heap, size_t size, int socket,
 	for (i = 0; i < n_other_pg_sz; i++) {
 		uint64_t pg_sz = other_pg_sz[i];
 
+		EAL_LOG(DEBUG, "alloc_more_mem_on_socket: Calling try_expand_heap with other page sizes (attempt %d)", i);
 		if (!try_expand_heap(heap, pg_sz, size, socket, flags,
-				align, bound, contig))
+				align, bound, contig)) {
+			EAL_LOG(DEBUG, "alloc_more_mem_on_socket: try_expand_heap succeeded, returning 0");
 			return 0;
+		}
+		EAL_LOG(DEBUG, "alloc_more_mem_on_socket: try_expand_heap failed, continuing");
 	}
 	return -1;
 }
@@ -741,12 +773,20 @@ malloc_heap_alloc_on_heap_id(size_t size, unsigned int heap_id, unsigned int fla
 	const struct internal_config *internal_conf =
 		eal_get_internal_configuration();
 
+	EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id called: size=%zu, heap_id=%u, flags=0x%x, align=%zu, bound=%zu, contig=%d, mem_type=%d",
+		size, heap_id, flags, align, bound, contig, mem_type);
+	EAL_LOG(DEBUG, "  heap=%p, heap->name='%s', heap->socket_id=%d, heap->total_size=%zu",
+		heap, heap->name, heap->socket_id, heap->total_size);
+
 	rte_spinlock_lock(&(heap->lock));
 
 	align = align == 0 ? 1 : align;
 
+	EAL_LOG(DEBUG, "  adjusted align=%zu, legacy_mem=%d", align, internal_conf->legacy_mem);
+
 	/* for legacy mode, try once and with all flags */
 	if (internal_conf->legacy_mem) {
+		EAL_LOG(DEBUG, "  using legacy mem mode, calling heap_alloc directly");
 		ret = heap_alloc(heap, size, flags, align, bound, contig);
 		goto alloc_unlock;
 	}
@@ -765,27 +805,43 @@ malloc_heap_alloc_on_heap_id(size_t size, unsigned int heap_id, unsigned int fla
 	 * knows what they're doing, and allow allocating from there with any
 	 * page size flags.
 	 */
-	if (socket_id < 0)
+	EAL_LOG(DEBUG, "  socket_id=%d (from heap_id=%u)", socket_id, heap_id);
+	if (socket_id < 0) {
+		EAL_LOG(DEBUG, "  external heap detected, adding SIZE_HINT_ONLY flag");
 		size_flags |= RTE_MEMZONE_SIZE_HINT_ONLY;
+	}
 
+	EAL_LOG(DEBUG, "  calling heap_alloc with size_flags=0x%x", size_flags);
 	ret = heap_alloc(heap, size, size_flags, align, bound, contig);
-	if (ret != NULL)
+	if (ret != NULL) {
+		EAL_LOG(DEBUG, "  heap_alloc succeeded, returning %p", ret);
 		goto alloc_unlock;
+	}
+
+	EAL_LOG(DEBUG, "  heap_alloc failed, ret=NULL");
 
 	/* if socket ID is invalid, this is an external heap */
-	if (socket_id < 0)
+	if (socket_id < 0) {
+		EAL_LOG(DEBUG, "  external heap and allocation failed, returning NULL");
 		goto alloc_unlock;
+	}
 
+	EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id: About to call alloc_more_mem_on_socket");
 	if (!alloc_more_mem_on_socket(heap, size, socket_id, flags, align,
 			bound, contig)) {
+		EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id: alloc_more_mem_on_socket succeeded");
+		EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id: About to call heap_alloc");
 		ret = heap_alloc(heap, size, flags, align, bound, contig);
+		EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id: heap_alloc returned %p", ret);
 
 		/* this should have succeeded */
 		if (ret == NULL)
 			EAL_LOG(ERR, "Error allocating from heap");
 	}
 alloc_unlock:
+	EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id: About to unlock heap spinlock");
 	rte_spinlock_unlock(&(heap->lock));
+	EAL_LOG(DEBUG, "malloc_heap_alloc_on_heap_id: Unlocked heap spinlock, returning %p", ret);
 	return ret;
 }
 

@@ -265,6 +265,9 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 	const struct internal_config *internal_conf =
 		eal_get_internal_configuration();
 
+	EAL_LOG(DEBUG, "%s(): Entering map_all_hugepages, num_pages=%u, hugepage_sz=%zu, hugedir=%s",
+		__func__, hpi->num_pages[0], hpi->hugepage_sz, hpi->hugedir);
+
 	/* Check if kernel supports NUMA. */
 	if (numa_available() != 0) {
 		EAL_LOG(DEBUG, "NUMA is not supported.");
@@ -290,6 +293,9 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 	for (i = 0; i < hpi->num_pages[0]; i++) {
 		struct hugepage_file *hf = &hugepg_tbl[i];
 		uint64_t hugepage_sz = hpi->hugepage_sz;
+
+		EAL_LOG(DEBUG, "%s(): Mapping hugepage %u/%u, size=%zu",
+			__func__, i, hpi->num_pages[0], hugepage_sz);
 
 #ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
 		if (maxnode) {
@@ -329,6 +335,9 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 				hpi->hugedir, hf->file_id, false);
 		hf->filepath[sizeof(hf->filepath) - 1] = '\0';
 
+		EAL_LOG(DEBUG, "%s(): Opening hugepage file: %s",
+			__func__, hf->filepath);
+
 		/* try to create hugepage file */
 		fd = open(hf->filepath, O_CREAT | O_RDWR, 0600);
 		if (fd < 0) {
@@ -336,6 +345,9 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 					strerror(errno));
 			goto out;
 		}
+
+		EAL_LOG(DEBUG, "%s(): Calling mmap for hugepage %u, size=%zu, fd=%d",
+			__func__, i, hugepage_sz, fd);
 
 		/* map the segment, and populate page tables,
 		 * the kernel fills this segment with zeros. we don't care where
@@ -350,6 +362,9 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 			close(fd);
 			goto out;
 		}
+
+		EAL_LOG(DEBUG, "%s(): mmap succeeded for hugepage %u, virtaddr=%p",
+			__func__, i, virtaddr);
 
 		hf->orig_va = virtaddr;
 
@@ -376,6 +391,8 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 		}
 		*(int *)virtaddr = 0;
 
+		EAL_LOG(DEBUG, "%s(): Page fault test passed for hugepage %u", __func__, i);
+
 		/* set shared lock on the file. */
 		if (flock(fd, LOCK_SH) < 0) {
 			EAL_LOG(DEBUG, "%s(): Locking file failed:%s ",
@@ -384,10 +401,13 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 			goto out;
 		}
 
+		EAL_LOG(DEBUG, "%s(): Locked hugepage file %u, closing fd", __func__, i);
+
 		close(fd);
 	}
 
 out:
+	EAL_LOG(DEBUG, "%s(): Mapped %u hugepages successfully", __func__, i);
 #ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
 	if (maxnode) {
 		EAL_LOG(DEBUG,

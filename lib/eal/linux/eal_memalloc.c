@@ -589,6 +589,9 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 
 	alloc_sz = hi->hugepage_sz;
 
+	EAL_LOG(DEBUG, "%s(): Entering alloc_seg: addr=%p, socket_id=%d, list_idx=%u, seg_idx=%u, hugepage_sz=%zu, cvm_shared=%s",
+		__func__, addr, socket_id, list_idx, seg_idx, alloc_sz, (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "yes" : "no");
+
 	/* these are checked at init, but code analyzers don't know that */
 	if (internal_conf->in_memory && !anonymous_hugepages_supported) {
 		EAL_LOG(ERR, "Anonymous hugepages not supported, in-memory mode cannot allocate memory");
@@ -604,6 +607,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	int mmap_flags;
 
 	if (internal_conf->in_memory && !memfd_create_supported) {
+		EAL_LOG(DEBUG, "%s(): Using in-memory mode without memfd", __func__);
+		
 		int in_memory_flags = MAP_HUGETLB | MAP_FIXED |
 				MAP_PRIVATE | MAP_ANONYMOUS;
 		int pagesz_flag;
@@ -617,6 +622,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 		dirty = false;
 		mmap_flags = in_memory_flags | pagesz_flag;
 
+		EAL_LOG(DEBUG, "%s(): mmap_flags=0x%x (in-memory mode)", __func__, mmap_flags);
+
 		/* single-file segments codepath will never be active
 		 * here because in-memory mode is incompatible with the
 		 * fallback path, and it's stopped at EAL initialization
@@ -624,6 +631,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 		 */
 		map_offset = 0;
 	} else {
+		EAL_LOG(DEBUG, "%s(): Using file-backed hugepage mode", __func__);
+		
 		/* takes out a read lock on segment or segment list */
 		fd = get_seg_fd(path, sizeof(path), hi, list_idx, seg_idx,
 				&dirty, mem_type);
@@ -632,8 +641,12 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 			return -1;
 		}
 
+		EAL_LOG(DEBUG, "%s(): Got fd=%d for hugepage file: %s", __func__, fd, path);
+
 		if (internal_conf->single_file_segments) {
 			map_offset = seg_idx * alloc_sz;
+			EAL_LOG(DEBUG, "%s(): Single-file segments mode, map_offset=%lu", __func__, map_offset);
+
 			ret = resize_hugefile(fd, map_offset, alloc_sz, true,
 					&dirty);
 			if (ret < 0)
@@ -642,6 +655,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 			get_fd_list_entry(list_idx, mem_type)->count++;
 		} else {
 			map_offset = 0;
+			EAL_LOG(DEBUG, "%s(): File-per-page mode, calling ftruncate with size=%zu", __func__, alloc_sz);
+			
 			if (ftruncate(fd, alloc_sz) < 0) {
 				EAL_LOG(DEBUG, "%s(): ftruncate() failed: %s",
 					__func__, strerror(errno));
@@ -649,6 +664,7 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 			}
 			if (internal_conf->hugepage_file.unlink_before_mapping &&
 					!internal_conf->in_memory) {
+				EAL_LOG(DEBUG, "%s(): Unlinking file before mapping: %s", __func__, path);
 				if (unlink(path)) {
 					EAL_LOG(DEBUG, "%s(): unlink() failed: %s",
 						__func__, strerror(errno));
@@ -660,6 +676,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 		/* Add MAP_CVM_SHARED for CVM shared memory (decrypted) */
 		if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
 			mmap_flags |= MAP_CVM_SHARED;
+		
+		EAL_LOG(DEBUG, "%s(): mmap_flags=0x%x (file-backed mode)", __func__, mmap_flags);
 	}
 
 	huge_register_sigbus();
@@ -668,6 +686,9 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	 * map the segment, and populate page tables, the kernel fills
 	 * this segment with zeros if it's a new page.
 	 */
+	EAL_LOG(DEBUG, "%s(): Calling mmap: addr=%p, size=%zu, flags=0x%x, fd=%d, offset=%lu",
+		__func__, addr, alloc_sz, mmap_flags, fd, map_offset);
+	
 	va = mmap(addr, alloc_sz, PROT_READ | PROT_WRITE, mmap_flags, fd,
 			map_offset);
 
@@ -679,11 +700,18 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 		 */
 		goto unmapped;
 	}
+
+	EAL_LOG(DEBUG, "%s(): mmap() returned va=%p", __func__, va);
+	EAL_LOG(DEBUG, "%s(): mmap() succeeded at %p with CVM shared: %s",
+		__func__, va, (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "yes" : "no");
+
 	if (va != addr) {
-		EAL_LOG(DEBUG, "%s(): wrong mmap() address", __func__);
+		EAL_LOG(DEBUG, "%s(): wrong mmap() address: expected %p, got %p", __func__, addr, va);
 		munmap(va, alloc_sz);
 		goto resized;
 	}
+
+	EAL_LOG(DEBUG, "%s(): mmap address matches expected address", __func__);
 
 	/* In linux, hugetlb limitations, like cgroup, are
 	 * enforced at fault time instead of mmap(), even
@@ -692,6 +720,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	 * environment here, if SIGBUS happens, we can jump
 	 * back here.
 	 */
+	EAL_LOG(DEBUG, "%s(): Setting up SIGBUS handler for page fault test", __func__);
+	
 	if (huge_wrap_sigsetjmp()) {
 		EAL_LOG(DEBUG, "SIGBUS: Cannot mmap more hugepages of size %uMB",
 			(unsigned int)(alloc_sz >> 20));
@@ -703,7 +733,10 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	 * that is already there, so read the old value, and write itback.
 	 * kernel populates the page with zeroes initially.
 	 */
+	EAL_LOG(DEBUG, "%s(): Triggering page fault by touching memory at %p", __func__, addr);
 	*(volatile int *)addr = *(volatile int *)addr;
+
+	EAL_LOG(DEBUG, "%s(): Page fault test passed, getting IOVA", __func__);
 
 	iova = rte_mem_virt2iova(addr);
 	if (iova == RTE_BAD_PHYS_ADDR) {
@@ -711,6 +744,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 			__func__);
 		goto mapped;
 	}
+
+	EAL_LOG(DEBUG, "%s(): Got IOVA: 0x%lx", __func__, iova);
 
 #ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
 	/*
@@ -720,6 +755,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	 * checked.
 	 */
 	if (check_numa()) {
+		EAL_LOG(DEBUG, "%s(): Checking NUMA socket placement", __func__);
+		
 		ret = get_mempolicy(&cur_socket_id, NULL, 0, addr,
 					MPOL_F_NODE | MPOL_F_ADDR);
 		if (ret < 0) {
@@ -732,6 +769,7 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 				__func__, socket_id, cur_socket_id);
 			goto mapped;
 		}
+		EAL_LOG(DEBUG, "%s(): NUMA socket check passed: socket_id=%d", __func__, cur_socket_id);
 	}
 #else
 	if (rte_socket_count() > 1)
@@ -751,11 +789,16 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	ms->flags = dirty ? RTE_MEMSEG_FLAG_DIRTY : 0;
 	ms->flags |= mem_type == RTE_MEMORY_TYPE_CVM_SHARED ? RTE_MEMSEG_FLAG_CVM_SHARED : 0;
 
+	EAL_LOG(DEBUG, "%s(): Successfully allocated segment: addr=%p, iova=0x%lx, socket_id=%d, dirty=%s",
+		__func__, addr, iova, socket_id, dirty ? "yes" : "no");
+
 	return 0;
 
 mapped:
+	EAL_LOG(DEBUG, "%s(): Failed after mmap, cleaning up", __func__);
 	munmap(addr, alloc_sz);
 unmapped:
+	EAL_LOG(DEBUG, "%s(): Recovering from failure, remapping virtual area", __func__);
 	huge_recover_sigbus();
 	flags = EAL_RESERVE_FORCE_ADDRESS;
 	new_addr = eal_get_virtual_area(addr, &alloc_sz, alloc_sz, 0, flags);
@@ -772,6 +815,7 @@ unmapped:
 	if (internal_conf->single_file_segments)
 		get_fd_list_entry(list_idx, mem_type)->count--;
 resized:
+	EAL_LOG(DEBUG, "%s(): Allocation failed, returning -1", __func__);
 	/* some codepaths will return negative fd, so exit early */
 	if (fd < 0)
 		return -1;
@@ -1210,8 +1254,10 @@ eal_memalloc_free_seg_bulk(struct rte_memseg **ms, int n_segs)
 
 		/* memalloc is locked, so it's safe to use thread-unsafe version
 		 */
+		EAL_LOG(ERR, "Calling memseg list walk to free segment");
 		walk_res = rte_memseg_list_walk_thread_unsafe_select(free_seg_walk,
 				&wa,  get_memseg_memory_type(cur));
+		EAL_LOG(ERR, "memseg list walk returned %d", walk_res);
 		if (walk_res == 1)
 			continue;
 		if (walk_res == 0)
