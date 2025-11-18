@@ -27,7 +27,7 @@ iavf_allocate_dma_mem_d(__rte_unused struct iavf_hw *hw,
 
 	snprintf(z_name, sizeof(z_name), "iavf_dma_%" PRIu64,
 		rte_atomic_fetch_add_explicit(&iavf_dma_memzone_id, 1, rte_memory_order_relaxed));
-	mz = rte_memzone_reserve_bounded(z_name, size, SOCKET_ID_ANY,
+	mz = rte_cvm_shared_memzone_reserve_bounded(z_name, size, SOCKET_ID_ANY,
 					 RTE_MEMZONE_IOVA_CONTIG, alignment,
 					 RTE_PGSIZE_2M);
 	if (!mz)
@@ -48,7 +48,7 @@ iavf_free_dma_mem_d(__rte_unused struct iavf_hw *hw,
 	if (!mem)
 		return IAVF_ERR_PARAM;
 
-	rte_memzone_free((const struct rte_memzone *)mem->zone);
+	rte_cvm_shared_memzone_free((const struct rte_memzone *)mem->zone);
 	mem->zone = NULL;
 	mem->va = NULL;
 	mem->pa = (u64)0;
@@ -65,7 +65,7 @@ iavf_allocate_virt_mem_d(__rte_unused struct iavf_hw *hw,
 		return IAVF_ERR_PARAM;
 
 	mem->size = size;
-	mem->va = rte_zmalloc("iavf", size, 0);
+	mem->va = rte_cvm_shared_zmalloc("iavf", size, 0);
 
 	if (mem->va)
 		return IAVF_SUCCESS;
@@ -80,7 +80,7 @@ iavf_free_virt_mem_d(__rte_unused struct iavf_hw *hw,
 	if (!mem)
 		return IAVF_ERR_PARAM;
 
-	rte_free(mem->va);
+	rte_cvm_shared_free(mem->va);
 	mem->va = NULL;
 
 	return IAVF_SUCCESS;

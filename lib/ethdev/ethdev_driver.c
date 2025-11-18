@@ -693,9 +693,9 @@ rte_eth_dma_zone_free(const struct rte_eth_dev *dev, const char *ring_name,
 		return -ENAMETOOLONG;
 	}
 
-	mz = rte_memzone_lookup(z_name);
+	mz = rte_cvm_shared_memzone_lookup(z_name);
 	if (mz)
-		rc = rte_memzone_free(mz);
+		rc = rte_cvm_shared_memzone_free(mz);
 	else
 		rc = -ENOENT;
 
@@ -719,7 +719,7 @@ rte_eth_dma_zone_reserve(const struct rte_eth_dev *dev, const char *ring_name,
 		return NULL;
 	}
 
-	mz = rte_memzone_lookup(z_name);
+	mz = rte_cvm_shared_memzone_lookup(z_name);
 	if (mz) {
 		if ((socket_id != SOCKET_ID_ANY && socket_id != mz->socket_id) ||
 				size > mz->len ||
@@ -733,7 +733,7 @@ rte_eth_dma_zone_reserve(const struct rte_eth_dev *dev, const char *ring_name,
 		return mz;
 	}
 
-	return rte_memzone_reserve_aligned(z_name, size, socket_id,
+	return rte_cvm_shared_memzone_reserve_aligned(z_name, size, socket_id,
 			RTE_MEMZONE_IOVA_CONTIG, align);
 }
 

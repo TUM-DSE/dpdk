@@ -2546,7 +2546,7 @@ iavf_init_vf(struct rte_eth_dev *dev)
 		goto err;
 	}
 
-	vf->aq_resp = rte_zmalloc("vf_aq_resp", IAVF_AQ_BUF_SZ, 0);
+	vf->aq_resp = rte_cvm_shared_zmalloc("vf_aq_resp", IAVF_AQ_BUF_SZ, 0);
 	if (!vf->aq_resp) {
 		PMD_INIT_LOG(ERR, "unable to allocate vf_aq_resp memory");
 		goto err_aq;
@@ -2558,7 +2558,7 @@ iavf_init_vf(struct rte_eth_dev *dev)
 
 	bufsz = sizeof(struct virtchnl_vf_resource) +
 		(IAVF_MAX_VF_VSI * sizeof(struct virtchnl_vsi_resource));
-	vf->vf_res = rte_zmalloc("vf_res", bufsz, 0);
+	vf->vf_res = rte_cvm_shared_zmalloc("vf_res", bufsz, 0);
 	if (!vf->vf_res) {
 		PMD_INIT_LOG(ERR, "unable to allocate vf_res memory");
 		goto err_api;
@@ -2570,13 +2570,13 @@ iavf_init_vf(struct rte_eth_dev *dev)
 	}
 	/* Allocate memort for RSS info */
 	if (vf->vf_res->vf_cap_flags & VIRTCHNL_VF_OFFLOAD_RSS_PF) {
-		vf->rss_key = rte_zmalloc("rss_key",
+		vf->rss_key = rte_cvm_shared_zmalloc("rss_key",
 					  vf->vf_res->rss_key_size, 0);
 		if (!vf->rss_key) {
 			PMD_INIT_LOG(ERR, "unable to allocate rss_key memory");
 			goto err_rss;
 		}
-		vf->rss_lut = rte_zmalloc("rss_lut",
+		vf->rss_lut = rte_cvm_shared_zmalloc("rss_lut",
 					  vf->vf_res->rss_lut_size, 0);
 		if (!vf->rss_lut) {
 			PMD_INIT_LOG(ERR, "unable to allocate rss_lut memory");
@@ -2605,7 +2605,7 @@ iavf_init_vf(struct rte_eth_dev *dev)
 		bufsz = sizeof(struct virtchnl_qos_cap_list) +
 			IAVF_MAX_TRAFFIC_CLASS *
 			sizeof(struct virtchnl_qos_cap_elem);
-		vf->qos_cap = rte_zmalloc("qos_cap", bufsz, 0);
+		vf->qos_cap = rte_cvm_shared_zmalloc("qos_cap", bufsz, 0);
 		if (!vf->qos_cap) {
 			PMD_INIT_LOG(ERR, "unable to allocate qos_cap memory");
 			goto err_rss;
@@ -2809,7 +2809,7 @@ iavf_dev_init(struct rte_eth_dev *eth_dev)
 	iavf_set_default_ptype_table(eth_dev);
 
 	/* copy mac addr */
-	eth_dev->data->mac_addrs = rte_zmalloc(
+	eth_dev->data->mac_addrs = rte_cvm_shared_zmalloc(
 		"iavf_mac", RTE_ETHER_ADDR_LEN * IAVF_NUM_MACADDR_MAX, 0);
 	if (!eth_dev->data->mac_addrs) {
 		PMD_INIT_LOG(ERR, "Failed to allocate %d bytes needed to"
