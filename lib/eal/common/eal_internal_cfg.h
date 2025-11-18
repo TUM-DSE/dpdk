@@ -71,6 +71,8 @@ struct internal_config {
 	/** true to try allocating memory on specific sockets */
 	volatile unsigned force_sockets;
 	volatile uint64_t socket_mem[RTE_MAX_NUMA_NODES]; /**< amount of memory per socket */
+	/** true if CVM shared (decrypted) memory is enabled */
+	volatile bool cvm_shared_memory_enabled;
 	volatile unsigned force_socket_limits;
 	volatile uint64_t socket_limit[RTE_MAX_NUMA_NODES]; /**< limit amount of memory per socket */
 	uintptr_t base_virtaddr;          /**< base address to try and reserve memory from */
@@ -102,6 +104,10 @@ struct internal_config {
 	struct simd_bitwidth max_simd_bitwidth;
 	/**< max simd bitwidth path to use */
 	size_t huge_worker_stack_size; /**< worker thread stack size */
+
+	/* CVM shared memory configuration */
+	volatile uint64_t cvm_shared_socket_mem[RTE_MAX_NUMA_NODES];
+	/**< amount of CVM shared (decrypted) memory per socket for DMA */
 };
 
 void eal_reset_internal_config(struct internal_config *internal_cfg);

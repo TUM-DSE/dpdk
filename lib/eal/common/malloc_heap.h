@@ -9,6 +9,7 @@
 #include <sys/queue.h>
 
 #include <rte_malloc.h>
+#include <rte_memory.h>
 #include <rte_spinlock.h>
 
 /* Number of free lists per heap, grouped by size. */
@@ -35,10 +36,11 @@ struct __rte_cache_aligned malloc_heap {
 
 void *
 malloc_heap_alloc(size_t size, int socket, unsigned int flags, size_t align,
-		  size_t bound, bool contig);
+		  size_t bound, bool contig, enum rte_memory_type mem_type);
 
 void *
-malloc_heap_alloc_biggest(int socket, unsigned int flags, size_t align, bool contig);
+malloc_heap_alloc_biggest(int socket, unsigned int flags, size_t align, bool contig,
+		enum rte_memory_type mem_type);
 
 int
 malloc_heap_create(struct malloc_heap *heap, const char *heap_name);
@@ -79,13 +81,17 @@ void
 malloc_heap_dump(struct malloc_heap *heap, FILE *f);
 
 int
-malloc_socket_to_heap_id(unsigned int socket_id);
+malloc_socket_to_heap_id(unsigned int socket_id, enum rte_memory_type mem_type);
 
 int
 rte_eal_malloc_heap_init(void);
 
 int
 rte_eal_malloc_heap_populate(void);
+
+/* Internal function to populate CVM shared heaps - called from rte_eal_memory_init */
+int
+rte_eal_malloc_heap_populate_cvm_shared_internal(void);
 
 void
 rte_eal_malloc_heap_cleanup(void);

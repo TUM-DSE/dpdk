@@ -416,7 +416,7 @@ memseg_primary_init(void)
 			n_segs = cur_mem / hugepage_sz;
 
 			if (eal_memseg_list_init(msl, hugepage_sz, n_segs,
-					0, type_msl_idx, false))
+					0, type_msl_idx, false, false))
 				return -1;
 
 			total_segs += msl->memseg_arr.len;

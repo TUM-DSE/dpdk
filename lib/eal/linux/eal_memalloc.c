@@ -27,6 +27,11 @@
 #include <linux/falloc.h>
 #include <linux/mman.h> /* for hugetlb-related mmap flags */
 
+/* MAP_CVM_SHARED for CVM shared memory */
+#ifndef MAP_CVM_SHARED
+#define MAP_CVM_SHARED	0x40		/* for CVM shared memory */
+#endif
+
 #include <rte_common.h>
 #include <rte_log.h>
 #include <rte_eal.h>
@@ -37,6 +42,10 @@
 #include "eal_memalloc.h"
 #include "eal_memcfg.h"
 #include "eal_private.h"
+
+/* Forward declaration of parametrized walk function from eal_common_memory.c */
+extern int rte_memseg_list_walk_thread_unsafe_select(rte_memseg_list_walk_t func,
+		void *arg, enum rte_memory_type mem_type);
 
 const int anonymous_hugepages_supported =
 #ifdef MAP_HUGE_SHIFT
@@ -87,17 +96,57 @@ static int fallocate_supported = -1; /* unknown */
  * they will be initialized at startup, and filled as we allocate/deallocate
  * segments.
  */
-static struct {
+typedef struct {
 	int *fds; /**< dynamically allocated array of segment lock fd's */
 	int memseg_list_fd; /**< memseg list fd */
 	int len; /**< total length of the array */
 	int count; /**< entries used in an array */
-} fd_list[RTE_MAX_MEMSEG_LISTS];
+} fd_list_entry_t;
+
+static fd_list_entry_t fd_list[RTE_MAX_MEMSEG_LISTS];
+
+/** CVM shared memory file descriptor tracking (parallel to fd_list) */
+static fd_list_entry_t fd_list_cvm_shared[RTE_MAX_MEMSEG_LISTS];
 
 /** local copy of a memory map, used to synchronize memory hotplug in MP */
 static struct rte_memseg_list local_memsegs[RTE_MAX_MEMSEG_LISTS];
 
 static sigjmp_buf huge_jmpenv;
+
+/* Helper to select the correct fd_list based on memory type */
+static inline fd_list_entry_t *
+get_fd_list_entry(int list_idx, enum rte_memory_type mem_type)
+{
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return &fd_list_cvm_shared[list_idx];
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return &fd_list[list_idx];
+	}
+}
+
+/* Helper to select between normal and CVM shared memseg list array */
+static inline struct rte_memseg_list *
+get_memseg_list_array(struct rte_mem_config *mcfg, enum rte_memory_type mem_type)
+{
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return mcfg->cvm_shared_memsegs;
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return mcfg->memsegs;
+	}
+}
+
+/* Helper to determine memory type from memseg flags */
+static inline enum rte_memory_type
+get_memseg_memory_type(const struct rte_memseg *ms)
+{
+	if (ms->flags & RTE_MEMSEG_FLAG_CVM_SHARED)
+		return RTE_MEMORY_TYPE_CVM_SHARED;
+	return RTE_MEMORY_TYPE_NORMAL;
+}
 
 static void huge_sigbus_handler(int signo __rte_unused)
 {
@@ -234,42 +283,47 @@ static int lock(int fd, int type)
 static int
 get_seg_memfd(struct hugepage_info *hi __rte_unused,
 		unsigned int list_idx __rte_unused,
-		unsigned int seg_idx __rte_unused)
+		unsigned int seg_idx __rte_unused,
+		enum rte_memory_type mem_type __rte_unused)
 {
 #ifdef MEMFD_SUPPORTED
 	int fd;
 	char segname[250]; /* as per manpage, limit is 249 bytes plus null */
+	fd_list_entry_t *fd_list_entry;
 
 	int flags = RTE_MFD_HUGETLB | pagesz_flags(hi->hugepage_sz);
 	const struct internal_config *internal_conf =
 		eal_get_internal_configuration();
 
+	fd_list_entry = get_fd_list_entry(list_idx, mem_type);
+
 	if (internal_conf->single_file_segments) {
-		fd = fd_list[list_idx].memseg_list_fd;
+		fd = fd_list_entry->memseg_list_fd;
 
 		if (fd < 0) {
-			snprintf(segname, sizeof(segname), "seg_%i", list_idx);
+			snprintf(segname, sizeof(segname), "seg_%i%s", list_idx,
+					(mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "_cvm" : "");
 			fd = memfd_create(segname, flags);
 			if (fd < 0) {
 				EAL_LOG(DEBUG, "%s(): memfd create failed: %s",
 					__func__, strerror(errno));
 				return -1;
 			}
-			fd_list[list_idx].memseg_list_fd = fd;
+			fd_list_entry->memseg_list_fd = fd;
 		}
 	} else {
-		fd = fd_list[list_idx].fds[seg_idx];
+		fd = fd_list_entry->fds[seg_idx];
 
 		if (fd < 0) {
-			snprintf(segname, sizeof(segname), "seg_%i-%i",
-					list_idx, seg_idx);
+			snprintf(segname, sizeof(segname), "seg_%i-%i%s",
+					list_idx, seg_idx, (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "_cvm" : "");
 			fd = memfd_create(segname, flags);
 			if (fd < 0) {
 				EAL_LOG(DEBUG, "%s(): memfd create failed: %s",
 					__func__, strerror(errno));
 				return -1;
 			}
-			fd_list[list_idx].fds[seg_idx] = fd;
+			fd_list_entry->fds[seg_idx] = fd;
 		}
 	}
 	return fd;
@@ -280,7 +334,7 @@ get_seg_memfd(struct hugepage_info *hi __rte_unused,
 static int
 get_seg_fd(char *path, int buflen, struct hugepage_info *hi,
 		unsigned int list_idx, unsigned int seg_idx,
-		bool *dirty)
+		bool *dirty, enum rte_memory_type mem_type)
 {
 	int fd;
 	int *out_fd;
@@ -296,16 +350,17 @@ get_seg_fd(char *path, int buflen, struct hugepage_info *hi,
 	 * memfd, and this is a special case.
 	 */
 	if (internal_conf->in_memory)
-		return get_seg_memfd(hi, list_idx, seg_idx);
+		return get_seg_memfd(hi, list_idx, seg_idx, mem_type);
 
 	if (internal_conf->single_file_segments) {
-		out_fd = &fd_list[list_idx].memseg_list_fd;
-		eal_get_hugefile_path(path, buflen, hi->hugedir, list_idx);
+		out_fd = &get_fd_list_entry(list_idx, mem_type)->memseg_list_fd;
+		eal_get_hugefile_path(path, buflen, hi->hugedir, list_idx, mem_type);
 	} else {
-		out_fd = &fd_list[list_idx].fds[seg_idx];
+		out_fd = &get_fd_list_entry(list_idx, mem_type)->fds[seg_idx];
 		eal_get_hugefile_path(path, buflen, hi->hugedir,
-				list_idx * RTE_MAX_MEMSEG_PER_LIST + seg_idx);
+				list_idx * RTE_MAX_MEMSEG_PER_LIST + seg_idx, mem_type);
 	}
+
 	fd = *out_fd;
 	if (fd >= 0)
 		return fd;
@@ -472,7 +527,7 @@ resize_hugefile_in_filesystem(int fd, uint64_t fa_offset, uint64_t page_sz,
 }
 
 static void
-close_hugefile(int fd, char *path, int list_idx)
+close_hugefile(int fd, char *path, int list_idx, enum rte_memory_type mem_type)
 {
 	const struct internal_config *internal_conf =
 		eal_get_internal_configuration();
@@ -487,7 +542,7 @@ close_hugefile(int fd, char *path, int list_idx)
 			__func__, path, strerror(errno));
 
 	close(fd);
-	fd_list[list_idx].memseg_list_fd = -1;
+	get_fd_list_entry(list_idx, mem_type)->memseg_list_fd = -1;
 }
 
 static int
@@ -514,7 +569,7 @@ resize_hugefile(int fd, uint64_t fa_offset, uint64_t page_sz, bool grow,
 static int
 alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 		struct hugepage_info *hi, unsigned int list_idx,
-		unsigned int seg_idx)
+		unsigned int seg_idx, enum rte_memory_type mem_type)
 {
 #ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
 	int cur_socket_id = 0;
@@ -549,9 +604,13 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	int mmap_flags;
 
 	if (internal_conf->in_memory && !memfd_create_supported) {
-		const int in_memory_flags = MAP_HUGETLB | MAP_FIXED |
+		int in_memory_flags = MAP_HUGETLB | MAP_FIXED |
 				MAP_PRIVATE | MAP_ANONYMOUS;
 		int pagesz_flag;
+
+		/* Add MAP_CVM_SHARED for CVM shared memory (decrypted) */
+		if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+			in_memory_flags |= MAP_CVM_SHARED;
 
 		pagesz_flag = pagesz_flags(alloc_sz);
 		fd = -1;
@@ -567,7 +626,7 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	} else {
 		/* takes out a read lock on segment or segment list */
 		fd = get_seg_fd(path, sizeof(path), hi, list_idx, seg_idx,
-				&dirty);
+				&dirty, mem_type);
 		if (fd < 0) {
 			EAL_LOG(ERR, "Couldn't get fd on hugepage file");
 			return -1;
@@ -580,7 +639,7 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 			if (ret < 0)
 				goto resized;
 
-			fd_list[list_idx].count++;
+			get_fd_list_entry(list_idx, mem_type)->count++;
 		} else {
 			map_offset = 0;
 			if (ftruncate(fd, alloc_sz) < 0) {
@@ -598,6 +657,9 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 			}
 		}
 		mmap_flags = MAP_SHARED | MAP_POPULATE | MAP_FIXED;
+		/* Add MAP_CVM_SHARED for CVM shared memory (decrypted) */
+		if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+			mmap_flags |= MAP_CVM_SHARED;
 	}
 
 	huge_register_sigbus();
@@ -687,6 +749,7 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
 	ms->iova = iova;
 	ms->socket_id = socket_id;
 	ms->flags = dirty ? RTE_MEMSEG_FLAG_DIRTY : 0;
+	ms->flags |= mem_type == RTE_MEMORY_TYPE_CVM_SHARED ? RTE_MEMSEG_FLAG_CVM_SHARED : 0;
 
 	return 0;
 
@@ -707,7 +770,7 @@ unmapped:
 	}
 	/* roll back the ref count */
 	if (internal_conf->single_file_segments)
-		fd_list[list_idx].count--;
+		get_fd_list_entry(list_idx, mem_type)->count--;
 resized:
 	/* some codepaths will return negative fd, so exit early */
 	if (fd < 0)
@@ -718,8 +781,8 @@ resized:
 		/* ignore failure, can't make it any worse */
 
 		/* if refcount is at zero, close the file */
-		if (fd_list[list_idx].count == 0)
-			close_hugefile(fd, path, list_idx);
+		if (get_fd_list_entry(list_idx, mem_type)->count == 0)
+			close_hugefile(fd, path, list_idx, mem_type);
 	} else {
 		/* only remove file if we can take out a write lock */
 		if (!internal_conf->hugepage_file.unlink_before_mapping &&
@@ -727,14 +790,14 @@ resized:
 				lock(fd, LOCK_EX) == 1)
 			unlink(path);
 		close(fd);
-		fd_list[list_idx].fds[seg_idx] = -1;
+		get_fd_list_entry(list_idx, mem_type)->fds[seg_idx] = -1;
 	}
 	return -1;
 }
 
 static int
 free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
-		unsigned int list_idx, unsigned int seg_idx)
+		unsigned int list_idx, unsigned int seg_idx, enum rte_memory_type mem_type)
 {
 	uint64_t map_offset;
 	char path[PATH_MAX];
@@ -764,7 +827,7 @@ free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
 	 * segment and thus drop the lock on original fd, but hugepage dir is
 	 * now locked so we can take out another one without races.
 	 */
-	fd = get_seg_fd(path, sizeof(path), hi, list_idx, seg_idx, NULL);
+	fd = get_seg_fd(path, sizeof(path), hi, list_idx, seg_idx, NULL, mem_type);
 	if (fd < 0)
 		return -1;
 
@@ -773,8 +836,8 @@ free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
 		if (resize_hugefile(fd, map_offset, ms->len, false, NULL))
 			return -1;
 
-		if (--(fd_list[list_idx].count) == 0)
-			close_hugefile(fd, path, list_idx);
+		if (--(get_fd_list_entry(list_idx, mem_type)->count) == 0)
+			close_hugefile(fd, path, list_idx, mem_type);
 
 		ret = 0;
 	} else {
@@ -793,7 +856,7 @@ free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
 		}
 		/* closing fd will drop the lock */
 		close(fd);
-		fd_list[list_idx].fds[seg_idx] = -1;
+		get_fd_list_entry(list_idx, mem_type)->fds[seg_idx] = -1;
 	}
 
 	memset(ms, 0, sizeof(*ms));
@@ -810,10 +873,11 @@ struct alloc_walk_param {
 	int socket;
 	bool exact;
 };
+/* Internal unified function for both regular and CVM shared segment allocation */
 static int
-alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
+alloc_seg_walk_internal(const struct rte_memseg_list *msl, void *arg,
+		struct rte_memseg_list *memsegs_array, enum rte_memory_type mem_type)
 {
-	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
 	struct alloc_walk_param *wa = arg;
 	struct rte_memseg_list *cur_msl;
 	size_t page_sz;
@@ -829,8 +893,8 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
 
 	page_sz = (size_t)msl->page_sz;
 
-	msl_idx = msl - mcfg->memsegs;
-	cur_msl = &mcfg->memsegs[msl_idx];
+	msl_idx = msl - memsegs_array;
+	cur_msl = &memsegs_array[msl_idx];
 
 	need = wa->n_segs;
 
@@ -895,9 +959,9 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
 				cur_idx * page_sz);
 
 		if (alloc_seg(cur, map_addr, wa->socket, wa->hi,
-				msl_idx, cur_idx)) {
-			EAL_LOG(DEBUG, "attempted to allocate %i segments, but only %i were allocated",
-				need, i);
+				msl_idx, cur_idx, mem_type)) {
+			EAL_LOG(DEBUG, "attempted to allocate %i %ssegments, but only %i were allocated",
+				need, (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "CVM shared " : "", i);
 
 			/* if exact number wasn't requested, stop */
 			if (!wa->exact)
@@ -915,7 +979,7 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
 				/* free_seg may attempt to create a file, which
 				 * may fail.
 				 */
-				if (free_seg(tmp, wa->hi, msl_idx, j))
+				if (free_seg(tmp, wa->hi, msl_idx, j, mem_type))
 					EAL_LOG(DEBUG, "Cannot free page");
 			}
 			/* clear the list */
@@ -963,11 +1027,15 @@ free_seg_walk(const struct rte_memseg_list *msl, void *arg)
 			(uintptr_t)wa->ms->addr >= end_addr)
 		return 0;
 
-	msl_idx = msl - mcfg->memsegs;
+	/* Determine memory type and get the correct memseg array */
+	enum rte_memory_type mem_type = get_memseg_memory_type(wa->ms);
+	struct rte_memseg_list *memsegs_array = get_memseg_list_array(mcfg, mem_type);
+
+	msl_idx = msl - memsegs_array;
 	seg_idx = RTE_PTR_DIFF(wa->ms->addr, start_addr) / msl->page_sz;
 
 	/* msl is const */
-	found_msl = &mcfg->memsegs[msl_idx];
+	found_msl = &memsegs_array[msl_idx];
 
 	/* do not allow any page allocations during the time we're freeing,
 	 * because file creation and locking operations are not atomic,
@@ -997,7 +1065,7 @@ free_seg_walk(const struct rte_memseg_list *msl, void *arg)
 
 	rte_fbarray_set_free(&found_msl->memseg_arr, seg_idx);
 
-	ret = free_seg(wa->ms, wa->hi, msl_idx, seg_idx);
+	ret = free_seg(wa->ms, wa->hi, msl_idx, seg_idx, mem_type);
 
 	if (dir_fd >= 0)
 		close(dir_fd);
@@ -1010,7 +1078,7 @@ free_seg_walk(const struct rte_memseg_list *msl, void *arg)
 
 int
 eal_memalloc_alloc_seg_bulk(struct rte_memseg **ms, int n_segs, size_t page_sz,
-		int socket, bool exact)
+		int socket, bool exact, enum rte_memory_type mem_type)
 {
 	int i, ret = -1;
 #ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
@@ -1058,11 +1126,25 @@ eal_memalloc_alloc_seg_bulk(struct rte_memseg **ms, int n_segs, size_t page_sz,
 	wa.socket = socket;
 	wa.segs_allocated = 0;
 
-	/* memalloc is locked, so it's safe to use thread-unsafe version */
-	ret = rte_memseg_list_walk_thread_unsafe(alloc_seg_walk, &wa);
+	/* Walk appropriate memseg lists directly using unified loop */
+	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	struct rte_memseg_list *memsegs_array = get_memseg_list_array(mcfg, mem_type);
+
+	for (i = 0; i < RTE_MAX_MEMSEG_LISTS; i++) {
+		struct rte_memseg_list *msl = &memsegs_array[i];
+
+		/* Both types use the same empty check - base_va is set for all MSLs */
+		if (msl->base_va == NULL)
+			continue;
+
+		ret = alloc_seg_walk_internal(msl, &wa, memsegs_array, mem_type);
+		if (ret > 0)
+			break;
+	}
+
 	if (ret == 0) {
-		EAL_LOG(DEBUG, "%s(): couldn't find suitable memseg_list",
-			__func__);
+		EAL_LOG(DEBUG, "%s(): couldn't find suitable %smemseg_list",
+			__func__, (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "CVM shared " : "");
 		ret = -1;
 	} else if (ret > 0) {
 		ret = (int)wa.segs_allocated;
@@ -1076,10 +1158,10 @@ eal_memalloc_alloc_seg_bulk(struct rte_memseg **ms, int n_segs, size_t page_sz,
 }
 
 struct rte_memseg *
-eal_memalloc_alloc_seg(size_t page_sz, int socket)
+eal_memalloc_alloc_seg(size_t page_sz, int socket, enum rte_memory_type mem_type)
 {
 	struct rte_memseg *ms;
-	if (eal_memalloc_alloc_seg_bulk(&ms, 1, page_sz, socket, true) < 0)
+	if (eal_memalloc_alloc_seg_bulk(&ms, 1, page_sz, socket, true, mem_type) < 0)
 		return NULL;
 	/* return pointer to newly allocated memseg */
 	return ms;
@@ -1128,8 +1210,8 @@ eal_memalloc_free_seg_bulk(struct rte_memseg **ms, int n_segs)
 
 		/* memalloc is locked, so it's safe to use thread-unsafe version
 		 */
-		walk_res = rte_memseg_list_walk_thread_unsafe(free_seg_walk,
-				&wa);
+		walk_res = rte_memseg_list_walk_thread_unsafe_select(free_seg_walk,
+				&wa,  get_memseg_memory_type(cur));
 		if (walk_res == 1)
 			continue;
 		if (walk_res == 0)
@@ -1213,12 +1295,12 @@ sync_chunk(struct rte_memseg_list *primary_msl,
 		if (used) {
 			ret = alloc_seg(l_ms, p_ms->addr,
 					p_ms->socket_id, hi,
-					msl_idx, seg_idx);
+					msl_idx, seg_idx, false);
 			if (ret < 0)
 				return -1;
 			rte_fbarray_set_used(l_arr, seg_idx);
 		} else {
-			ret = free_seg(l_ms, hi, msl_idx, seg_idx);
+			ret = free_seg(l_ms, hi, msl_idx, seg_idx, false);
 			rte_fbarray_set_free(l_arr, seg_idx);
 			if (ret < 0)
 				return -1;
@@ -1489,12 +1571,13 @@ secondary_msl_destroy_walk(const struct rte_memseg_list *msl,
 }
 
 static int
-alloc_list(int list_idx, int len)
+alloc_list(int list_idx, int len, enum rte_memory_type mem_type)
 {
 	int *data;
 	int i;
 	const struct internal_config *internal_conf =
 		eal_get_internal_configuration();
+	fd_list_entry_t *fd_list_entry = get_fd_list_entry(list_idx, mem_type);
 
 	/* single-file segments mode does not need fd list */
 	if (!internal_conf->single_file_segments) {
@@ -1507,43 +1590,44 @@ alloc_list(int list_idx, int len)
 		/* set all fd's as invalid */
 		for (i = 0; i < len; i++)
 			data[i] = -1;
-		fd_list[list_idx].fds = data;
-		fd_list[list_idx].len = len;
+		fd_list_entry->fds = data;
+		fd_list_entry->len = len;
 	} else {
-		fd_list[list_idx].fds = NULL;
-		fd_list[list_idx].len = 0;
+		fd_list_entry->fds = NULL;
+		fd_list_entry->len = 0;
 	}
 
-	fd_list[list_idx].count = 0;
-	fd_list[list_idx].memseg_list_fd = -1;
+	fd_list_entry->count = 0;
+	fd_list_entry->memseg_list_fd = -1;
 
 	return 0;
 }
 
 static int
-destroy_list(int list_idx)
+destroy_list(int list_idx, enum rte_memory_type mem_type)
 {
 	const struct internal_config *internal_conf =
 			eal_get_internal_configuration();
+	fd_list_entry_t *fd_list_entry = get_fd_list_entry(list_idx, mem_type);
 
 	/* single-file segments mode does not need fd list */
 	if (!internal_conf->single_file_segments) {
-		int *fds = fd_list[list_idx].fds;
+		int *fds = fd_list_entry->fds;
 		int i;
 		/* go through each fd and ensure it's closed */
-		for (i = 0; i < fd_list[list_idx].len; i++) {
+		for (i = 0; i < fd_list_entry->len; i++) {
 			if (fds[i] >= 0) {
 				close(fds[i]);
 				fds[i] = -1;
 			}
 		}
 		free(fds);
-		fd_list[list_idx].fds = NULL;
-		fd_list[list_idx].len = 0;
-	} else if (fd_list[list_idx].memseg_list_fd >= 0) {
-		close(fd_list[list_idx].memseg_list_fd);
-		fd_list[list_idx].count = 0;
-		fd_list[list_idx].memseg_list_fd = -1;
+		fd_list_entry->fds = NULL;
+		fd_list_entry->len = 0;
+	} else if (fd_list_entry->memseg_list_fd >= 0) {
+		close(fd_list_entry->memseg_list_fd);
+		fd_list_entry->count = 0;
+		fd_list_entry->memseg_list_fd = -1;
 	}
 	return 0;
 }
@@ -1562,7 +1646,7 @@ fd_list_create_walk(const struct rte_memseg_list *msl,
 	msl_idx = msl - mcfg->memsegs;
 	len = msl->memseg_arr.len;
 
-	return alloc_list(msl_idx, len);
+	return alloc_list(msl_idx, len, false);
 }
 
 static int
@@ -1576,7 +1660,38 @@ fd_list_destroy_walk(const struct rte_memseg_list *msl, void *arg __rte_unused)
 
 	msl_idx = msl - mcfg->memsegs;
 
-	return destroy_list(msl_idx);
+	return destroy_list(msl_idx, RTE_MEMORY_TYPE_NORMAL);
+}
+
+static int
+fd_list_create_walk_cvm_shared(const struct rte_memseg_list *msl,
+		void *arg __rte_unused)
+{
+	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	unsigned int len;
+	int msl_idx;
+
+	if (msl->external)
+		return 0;
+
+	msl_idx = msl - mcfg->cvm_shared_memsegs;
+	len = msl->memseg_arr.len;
+
+	return alloc_list(msl_idx, len, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+static int
+fd_list_destroy_walk_cvm_shared(const struct rte_memseg_list *msl, void *arg __rte_unused)
+{
+	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	int msl_idx;
+
+	if (msl->external)
+		return 0;
+
+	msl_idx = msl - mcfg->cvm_shared_memsegs;
+
+	return destroy_list(msl_idx, RTE_MEMORY_TYPE_CVM_SHARED);
 }
 
 int
@@ -1591,13 +1706,13 @@ eal_memalloc_set_seg_fd(int list_idx, int seg_idx, int fd)
 		return -ENOTSUP;
 
 	/* if list is not allocated, allocate it */
-	if (fd_list[list_idx].len == 0) {
+	if (get_fd_list_entry(list_idx, RTE_MEMORY_TYPE_NORMAL)->len == 0) {
 		int len = mcfg->memsegs[list_idx].memseg_arr.len;
 
-		if (alloc_list(list_idx, len) < 0)
+		if (alloc_list(list_idx, len, RTE_MEMORY_TYPE_NORMAL) < 0)
 			return -ENOMEM;
 	}
-	fd_list[list_idx].fds[seg_idx] = fd;
+	get_fd_list_entry(list_idx, RTE_MEMORY_TYPE_NORMAL)->fds[seg_idx] = fd;
 
 	return 0;
 }
@@ -1612,7 +1727,7 @@ eal_memalloc_set_seg_list_fd(int list_idx, int fd)
 	if (!internal_conf->single_file_segments)
 		return -ENOTSUP;
 
-	fd_list[list_idx].memseg_list_fd = fd;
+	get_fd_list_entry(list_idx, false)->memseg_list_fd = fd;
 
 	return 0;
 }
@@ -1635,12 +1750,12 @@ eal_memalloc_get_seg_fd(int list_idx, int seg_idx)
 	}
 
 	if (internal_conf->single_file_segments) {
-		fd = fd_list[list_idx].memseg_list_fd;
-	} else if (fd_list[list_idx].len == 0) {
+		fd = get_fd_list_entry(list_idx, false)->memseg_list_fd;
+	} else if (get_fd_list_entry(list_idx, false)->len == 0) {
 		/* list not initialized */
 		fd = -1;
 	} else {
-		fd = fd_list[list_idx].fds[seg_idx];
+		fd = get_fd_list_entry(list_idx, false)->fds[seg_idx];
 	}
 	if (fd < 0)
 		return -ENODEV;
@@ -1699,16 +1814,16 @@ eal_memalloc_get_seg_fd_offset(int list_idx, int seg_idx, size_t *offset)
 		size_t pgsz = mcfg->memsegs[list_idx].page_sz;
 
 		/* segment not active? */
-		if (fd_list[list_idx].memseg_list_fd < 0)
+		if (get_fd_list_entry(list_idx, false)->memseg_list_fd < 0)
 			return -ENOENT;
 		*offset = pgsz * seg_idx;
 	} else {
 		/* fd_list not initialized? */
-		if (fd_list[list_idx].len == 0)
+		if (get_fd_list_entry(list_idx, false)->len == 0)
 			return -ENODEV;
 
 		/* segment not active? */
-		if (fd_list[list_idx].fds[seg_idx] < 0)
+		if (get_fd_list_entry(list_idx, false)->fds[seg_idx] < 0)
 			return -ENOENT;
 		*offset = 0;
 	}
@@ -1720,6 +1835,10 @@ eal_memalloc_cleanup(void)
 {
 	/* close all remaining fd's - these are per-process, so it's safe */
 	if (rte_memseg_list_walk_thread_unsafe(fd_list_destroy_walk, NULL))
+		return -1;
+
+	/* close all remaining CVM shared fd's */
+	if (rte_memseg_list_walk_thread_unsafe_select(fd_list_destroy_walk_cvm_shared, NULL, RTE_MEMORY_TYPE_CVM_SHARED))
 		return -1;
 
 	/* destroy the shadow page table if we're a secondary process */
@@ -1783,5 +1902,10 @@ eal_memalloc_init(void)
 	/* initialize all of the fd lists */
 	if (rte_memseg_list_walk_thread_unsafe(fd_list_create_walk, NULL))
 		return -1;
+
+	/* initialize CVM shared fd lists */
+	if (rte_memseg_list_walk_thread_unsafe_select(fd_list_create_walk_cvm_shared, NULL, RTE_MEMORY_TYPE_CVM_SHARED))
+		return -1;
+
 	return 0;
 }

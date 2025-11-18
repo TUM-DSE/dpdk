@@ -70,7 +70,7 @@ malloc_socket(const char *type, size_t size, unsigned int align,
 		socket_arg = SOCKET_ID_ANY;
 
 	ptr = malloc_heap_alloc(size, socket_arg, 0,
-			align == 0 ? 1 : align, 0, false);
+			align == 0 ? 1 : align, 0, false, RTE_MEMORY_TYPE_NORMAL);
 
 	if (trace_ena)
 		rte_eal_trace_mem_malloc(type, size, align, socket_arg, ptr);
@@ -81,7 +81,7 @@ malloc_socket(const char *type, size_t size, unsigned int align,
  * Allocate memory on specified heap.
  */
 void *
-rte_malloc_socket(const char *type, size_t size, unsigned int align,
+rte_malloc_socket(const char *type, size_t size, unsigned align,
 		int socket_arg)
 {
 	return malloc_socket(type, size, align, socket_arg, true);
@@ -239,7 +239,7 @@ rte_malloc_get_socket_stats(int socket,
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
 	int heap_idx;
 
-	heap_idx = malloc_socket_to_heap_id(socket);
+	heap_idx = malloc_socket_to_heap_id(socket, RTE_MEMORY_TYPE_NORMAL);
 	if (heap_idx < 0)
 		return -1;
 
@@ -661,5 +661,147 @@ rte_malloc_heap_destroy(const char *heap_name)
 unlock:
 	rte_mcfg_mem_write_unlock();
 
+	return ret;
+}
+
+/* CVM Shared Memory Allocation Functions */
+
+static void *
+malloc_cvm_shared_socket(const char *type, size_t size, unsigned align,
+		int socket, bool trace_ena)
+{
+	void *ptr;
+
+	ptr = malloc_heap_alloc(size, socket, 0,
+			align == 0 ? 1 : align, 0, false, RTE_MEMORY_TYPE_CVM_SHARED);
+
+	if (trace_ena)
+		rte_eal_trace_mem_malloc(type, size, align, socket, ptr);
+
+	return ptr;
+}
+
+void *
+rte_cvm_shared_malloc_socket(const char *type, size_t size, unsigned align, int socket)
+{
+	return malloc_cvm_shared_socket(type, size, align, socket, true);
+}
+
+void *
+rte_cvm_shared_zmalloc_socket(const char *type, size_t size, unsigned align, int socket)
+{
+	void *ptr = rte_cvm_shared_malloc_socket(type, size, align, socket);
+
+	if (ptr != NULL) {
+		struct malloc_elem *elem = malloc_elem_from_data(ptr);
+
+		if (elem->dirty) {
+			memset(ptr, 0, size);
+		} else {
+#ifdef RTE_MALLOC_DEBUG
+			memset(ptr, 0, size);
+#endif
+		}
+	}
+
+	rte_eal_trace_mem_zmalloc(type, size, align, socket, ptr);
+	return ptr;
+}
+
+void *
+rte_cvm_shared_calloc_socket(const char *type, size_t num, size_t size,
+		unsigned align, int socket)
+{
+	return rte_cvm_shared_zmalloc_socket(type, num * size, align, socket);
+}
+
+void *
+rte_cvm_shared_malloc(const char *type, size_t size, unsigned align)
+{
+	return rte_cvm_shared_malloc_socket(type, size, align, SOCKET_ID_ANY);
+}
+
+void *
+rte_cvm_shared_zmalloc(const char *type, size_t size, unsigned align)
+{
+	return rte_cvm_shared_zmalloc_socket(type, size, align, SOCKET_ID_ANY);
+}
+
+void *
+rte_cvm_shared_calloc(const char *type, size_t num, size_t size,
+		unsigned align)
+{
+	return rte_cvm_shared_calloc_socket(type, num, size, align, SOCKET_ID_ANY);
+}
+
+void *
+rte_cvm_shared_realloc_socket(void *ptr, size_t size, unsigned align, int socket)
+{
+	size_t user_size;
+
+	if (ptr == NULL)
+		return rte_cvm_shared_malloc_socket(NULL, size, align, socket);
+
+	struct malloc_elem *elem = malloc_elem_from_data(ptr);
+	if (elem == NULL) {
+		EAL_LOG(ERR, "Error: memory corruption detected");
+		return NULL;
+	}
+
+	user_size = size;
+
+	size = RTE_CACHE_LINE_ROUNDUP(size), align = RTE_CACHE_LINE_ROUNDUP(align);
+
+	/* check requested socket id and alignment matches first, and if ok,
+	 * see if we can resize block
+	 */
+	if ((socket == SOCKET_ID_ANY ||
+	     (unsigned int)socket == elem->heap->socket_id) &&
+			RTE_PTR_ALIGN(ptr, align) == ptr &&
+			malloc_heap_resize(elem, size) == 0) {
+		rte_eal_trace_mem_realloc(size, align, socket, ptr);
+
+		asan_set_redzone(elem, user_size);
+
+		return ptr;
+	}
+
+	/* either requested socket id doesn't match, alignment is off
+	 * or we have no room to expand,
+	 * so move the data.
+	 */
+	void *new_ptr = rte_cvm_shared_malloc_socket(NULL, size, align, socket);
+	if (new_ptr == NULL)
+		return NULL;
+	/* elem: |pad|data_elem|data|trailer| */
+	const size_t old_size = old_malloc_size(elem);
+	rte_memcpy(new_ptr, ptr, old_size < size ? old_size : size);
+	rte_free(ptr);
+
+	rte_eal_trace_mem_realloc(size, align, socket, new_ptr);
+	return new_ptr;
+}
+
+void *
+rte_cvm_shared_realloc(void *ptr, size_t size, unsigned align)
+{
+	return rte_cvm_shared_realloc_socket(ptr, size, align, SOCKET_ID_ANY);
+}
+
+void
+rte_cvm_shared_free(void *ptr)
+{
+	rte_free(ptr);
+}
+
+void *
+rte_cvm_shared_malloc_biggest(int socket, unsigned int flags, unsigned int align,
+		bool contig)
+{
+	void *ret;
+
+	ret = malloc_heap_alloc_biggest(socket, flags, align, contig, RTE_MEMORY_TYPE_CVM_SHARED);
+
+	rte_eal_trace_mem_malloc(NULL, 0, align, socket, ret);
 	return ret;
 }

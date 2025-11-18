@@ -38,10 +38,20 @@ extern "C" {
 
 #define SOCKET_ID_ANY -1                    /**< Any NUMA socket. */
 
+/**
+ * Memory type enumeration for selecting between normal and CVM shared memory.
+ */
+enum rte_memory_type {
+	RTE_MEMORY_TYPE_NORMAL = 0,     /**< Normal memory allocation. */
+	RTE_MEMORY_TYPE_CVM_SHARED = 1  /**< CVM shared (decrypted) memory for DMA. */
+};
+
 /** Prevent this segment from being freed back to the OS. */
 #define RTE_MEMSEG_FLAG_DO_NOT_FREE RTE_BIT32(0)
 /** This segment is not filled with zeros. */
 #define RTE_MEMSEG_FLAG_DIRTY RTE_BIT32(1)
+/** This segment is allocated on CVM_SHARED memory. */
+#define RTE_MEMSEG_FLAG_CVM_SHARED RTE_BIT32(2)
 
 /**
  * Physical memory segment descriptor.

@@ -181,6 +181,16 @@ DPDK_25 {
 	rte_malloc_socket;
 	rte_malloc_validate;
 	rte_malloc_virt2iova;
+	rte_cvm_shared_malloc;
+	rte_cvm_shared_malloc_socket;
+	rte_cvm_shared_zmalloc;
+	rte_cvm_shared_zmalloc_socket;
+	rte_cvm_shared_calloc;
+	rte_cvm_shared_calloc_socket;
+	rte_cvm_shared_realloc;
+	rte_cvm_shared_realloc_socket;
+	rte_cvm_shared_free;
+	rte_cvm_shared_malloc_biggest;
 	rte_mcfg_get_single_file_segments;
 	rte_mcfg_mem_read_lock;
 	rte_mcfg_mem_read_unlock;
@@ -231,6 +241,11 @@ DPDK_25 {
 	rte_memzone_reserve_aligned;
 	rte_memzone_reserve_bounded;
 	rte_memzone_walk;
+	rte_cvm_shared_memzone_reserve;
+	rte_cvm_shared_memzone_reserve_aligned;
+	rte_cvm_shared_memzone_reserve_bounded;
+	rte_cvm_shared_memzone_free;
+	rte_cvm_shared_memzone_lookup;
 	rte_mp_action_register;
 	rte_mp_action_unregister;
 	rte_mp_disable;

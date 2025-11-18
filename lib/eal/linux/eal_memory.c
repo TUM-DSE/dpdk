@@ -326,7 +326,7 @@ map_all_hugepages(struct hugepage_file *hugepg_tbl, struct hugepage_info *hpi,
 		hf->file_id = i;
 		hf->size = hugepage_sz;
 		eal_get_hugefile_path(hf->filepath, sizeof(hf->filepath),
-				hpi->hugedir, hf->file_id);
+				hpi->hugedir, hf->file_id, false);
 		hf->filepath[sizeof(hf->filepath) - 1] = '\0';
 
 		/* try to create hugepage file */
@@ -971,7 +971,7 @@ prealloc_segments(struct hugepage_file *hugepages, int n_pages)
 
 			/* now, allocate fbarray itself */
 			if (eal_memseg_list_init(msl, page_sz, n_segs,
-					socket, msl_idx, true) < 0)
+					socket, msl_idx, true, false) < 0)
 				return -1;
 
 			/* finally, allocate VA space */
@@ -1659,7 +1659,7 @@ rte_eal_hugepage_init(void)
 
 	return internal_conf->legacy_mem ?
 			eal_legacy_hugepage_init() :
-			eal_dynmem_hugepage_init();
+			eal_dynmem_hugepage_init() && eal_cvm_shared_hugepage_init();
 }
 
 int
@@ -1844,7 +1844,7 @@ memseg_primary_init_32(void)
 
 				if (eal_memseg_list_init(msl, hugepage_sz,
 						n_segs, socket_id, type_msl_idx,
-						true)) {
+						true, false)) {
 					/* failing to allocate a memseg list is
 					 * a serious error.
 					 */

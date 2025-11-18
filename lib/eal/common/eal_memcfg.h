@@ -78,6 +78,13 @@ struct rte_mem_config {
 	uint8_t dma_maskbits; /**< Keeps the more restricted dma mask. */
 
 	size_t max_memzone; /**< Maximum number of allocated memzones. */
+
+	/* CVM shared memory structures - for DMA with MAP_CVM_SHARED */
+	struct rte_fbarray cvm_shared_memzones; /**< CVM shared memzone descriptors. */
+	struct rte_memseg_list cvm_shared_memsegs[RTE_MAX_MEMSEG_LISTS];
+	/**< CVM shared memseg lists (decrypted memory for DMA) */
+	struct malloc_heap cvm_shared_malloc_heaps[RTE_MAX_HEAPS];
+	/**< CVM shared malloc heaps (allocate decrypted memory) */
 };
 
 /* update internal config from shared mem config */

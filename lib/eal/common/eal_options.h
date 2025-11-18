@@ -67,6 +67,10 @@ enum {
 	OPT_SOCKET_MEM_NUM,
 #define OPT_SOCKET_LIMIT        "socket-limit"
 	OPT_SOCKET_LIMIT_NUM,
+#define OPT_CVM_SHARED_SOCKET_MEM "cvm-shared-socket-mem"
+	OPT_CVM_SHARED_SOCKET_MEM_NUM,
+#define OPT_ENABLE_CVM_SHARED_MEMORY "enable-cvm-shared-memory"
+	OPT_ENABLE_CVM_SHARED_MEMORY_NUM,
 #define OPT_SYSLOG            "syslog"
 	OPT_SYSLOG_NUM,
 #define OPT_VDEV              "vdev"

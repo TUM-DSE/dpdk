@@ -275,12 +275,16 @@ eal_memseg_list_init_named(struct rte_memseg_list *msl, const char *name,
  *
  * @param type_msl_idx
  *  Index of the MSL among other MSLs of the same socket and page size.
+ * @param mem_type
+ *  Memory type: RTE_MEMORY_TYPE_NORMAL or RTE_MEMORY_TYPE_CVM_SHARED.
+ *  Determines the naming format for the backing storage.
  *
  * @see eal_memseg_list_init_named for remaining parameters description.
  */
 int
 eal_memseg_list_init(struct rte_memseg_list *msl, uint64_t page_sz,
-	int n_segs, int socket_id, int type_msl_idx, bool heap);
+	int n_segs, int socket_id, int type_msl_idx, bool heap,
+	enum rte_memory_type mem_type);
 
 /**
  * Reserve VA space for a memory segment list
@@ -326,6 +330,16 @@ eal_dynmem_memseg_lists_init(void);
  */
 int
 eal_dynmem_hugepage_init(void);
+
+/**
+ * Preallocate CVM shared hugepages for DMA operations.
+ * Note: CVM shared memseg lists are initialized within eal_dynmem_memseg_lists_init().
+ *
+ * @return
+ *  0 on success, (-1) on failure.
+ */
+int
+eal_cvm_shared_hugepage_init(void);
 
 /**
  * Given the list of hugepage sizes and the number of pages thereof,

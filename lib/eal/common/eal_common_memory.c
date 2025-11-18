@@ -38,6 +38,7 @@
  */
 
 #define MEMSEG_LIST_FMT "memseg-%" PRIu64 "k-%i-%i"
+#define CVM_SHARED_MEMSEG_LIST_FMT "memseg-cvm-%" PRIu64 "k-%i-%i"
 
 static void *next_baseaddr;
 static uint64_t system_page_sz;
@@ -221,12 +222,17 @@ eal_memseg_list_init_named(struct rte_memseg_list *msl, const char *name,
 
 int
 eal_memseg_list_init(struct rte_memseg_list *msl, uint64_t page_sz,
-		int n_segs, int socket_id, int type_msl_idx, bool heap)
+		int n_segs, int socket_id, int type_msl_idx, bool heap,
+		enum rte_memory_type mem_type)
 {
 	char name[RTE_FBARRAY_NAME_LEN];
 
-	snprintf(name, sizeof(name), MEMSEG_LIST_FMT, page_sz >> 10, socket_id,
-		 type_msl_idx);
+	if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+		snprintf(name, sizeof(name), CVM_SHARED_MEMSEG_LIST_FMT, page_sz >> 10, socket_id,
+			 type_msl_idx);
+	else
+		snprintf(name, sizeof(name), MEMSEG_LIST_FMT, page_sz >> 10, socket_id,
+			 type_msl_idx);
 
 	return eal_memseg_list_init_named(
 		msl, name, page_sz, n_segs, socket_id, heap);
@@ -327,13 +333,32 @@ virt2memseg_list(const void *addr)
 
 		start = msl->base_va;
 		end = RTE_PTR_ADD(start, msl->len);
-		if (addr >= start && addr < end)
-			break;
+		if (addr >= start && addr < end) {
+			return msl;
+		}
 	}
-	/* if we didn't find our memseg list */
-	if (msl_idx == RTE_MAX_MEMSEG_LISTS)
-		return NULL;
-	return msl;
+
+	/* If not found in regular memsegs, search CVM shared memsegs */
+	for (msl_idx = 0; msl_idx < RTE_MAX_MEMSEG_LISTS; msl_idx++) {
+		void *start, *end;
+		msl = &mcfg->cvm_shared_memsegs[msl_idx];
+
+		start = msl->base_va;
+		end = RTE_PTR_ADD(start, msl->len);
+		
+		if (msl->base_va != NULL) {
+			EAL_LOG(DEBUG, "virt2memseg_list: CVM shared memseg[%d]: base_va=%p, len=%zu, range=[%p, %p)",
+				msl_idx, start, msl->len, start, end);
+		}
+		
+		if (addr >= start && addr < end) {
+			EAL_LOG(DEBUG, "virt2memseg_list: Found in CVM shared memseg[%d]", msl_idx);
+			return msl;
+		}
+	}
+
+	/* Not found in either array */
+	return NULL;
 }
 
 struct rte_memseg_list *
@@ -665,14 +690,41 @@ rte_mem_lock_page(const void *virt)
 	return rte_mem_lock((void *)aligned, page_size);
 }
 
+/* Helper to select between normal and CVM shared memseg list array */
+static inline struct rte_memseg_list *
+get_memseg_list_array(struct rte_mem_config *mcfg, enum rte_memory_type mem_type)
+{
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return mcfg->cvm_shared_memsegs;
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return mcfg->memsegs;
+	}
+}
+
+/* Forward declarations for internal parametrized walk functions */
 int
-rte_memseg_contig_walk_thread_unsafe(rte_memseg_contig_walk_t func, void *arg)
+rte_memseg_contig_walk_thread_unsafe_select(rte_memseg_contig_walk_t func, void *arg,
+		enum rte_memory_type mem_type);
+int
+rte_memseg_walk_thread_unsafe_select(rte_memseg_walk_t func, void *arg,
+		enum rte_memory_type mem_type);
+int
+rte_memseg_list_walk_thread_unsafe_select(rte_memseg_list_walk_t func, void *arg,
+		enum rte_memory_type mem_type);
+
+/* Internal parametrized version that supports both regular and CVM shared memsegs */
+int
+rte_memseg_contig_walk_thread_unsafe_select(rte_memseg_contig_walk_t func, void *arg,
+		enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	struct rte_memseg_list *memsegs = get_memseg_list_array(mcfg, mem_type);
 	int i, ms_idx, ret = 0;
 
 	for (i = 0; i < RTE_MAX_MEMSEG_LISTS; i++) {
-		struct rte_memseg_list *msl = &mcfg->memsegs[i];
+		struct rte_memseg_list *msl = &memsegs[i];
 		const struct rte_memseg *ms;
 		struct rte_fbarray *arr;
 
@@ -705,6 +757,12 @@ rte_memseg_contig_walk_thread_unsafe(rte_memseg_contig_walk_t func, void *arg)
 }
 
 int
+rte_memseg_contig_walk_thread_unsafe(rte_memseg_contig_walk_t func, void *arg)
+{
+	return rte_memseg_contig_walk_thread_unsafe_select(func, arg, RTE_MEMORY_TYPE_NORMAL);
+}
+
+int
 rte_memseg_contig_walk(rte_memseg_contig_walk_t func, void *arg)
 {
 	int ret = 0;
@@ -717,14 +775,17 @@ rte_memseg_contig_walk(rte_memseg_contig_walk_t func, void *arg)
 	return ret;
 }
 
+/* Internal parametrized version that supports both regular and CVM shared memsegs */
 int
-rte_memseg_walk_thread_unsafe(rte_memseg_walk_t func, void *arg)
+rte_memseg_walk_thread_unsafe_select(rte_memseg_walk_t func, void *arg,
+		enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	struct rte_memseg_list *memsegs = get_memseg_list_array(mcfg, mem_type);
 	int i, ms_idx, ret = 0;
 
 	for (i = 0; i < RTE_MAX_MEMSEG_LISTS; i++) {
-		struct rte_memseg_list *msl = &mcfg->memsegs[i];
+		struct rte_memseg_list *msl = &memsegs[i];
 		const struct rte_memseg *ms;
 		struct rte_fbarray *arr;
 
@@ -746,6 +807,12 @@ rte_memseg_walk_thread_unsafe(rte_memseg_walk_t func, void *arg)
 }
 
 int
+rte_memseg_walk_thread_unsafe(rte_memseg_walk_t func, void *arg)
+{
+	return rte_memseg_walk_thread_unsafe_select(func, arg, RTE_MEMORY_TYPE_NORMAL);
+}
+
+int
 rte_memseg_walk(rte_memseg_walk_t func, void *arg)
 {
 	int ret = 0;
@@ -758,14 +825,17 @@ rte_memseg_walk(rte_memseg_walk_t func, void *arg)
 	return ret;
 }
 
+/* Internal parametrized version that supports both regular and CVM shared memsegs */
 int
-rte_memseg_list_walk_thread_unsafe(rte_memseg_list_walk_t func, void *arg)
+rte_memseg_list_walk_thread_unsafe_select(rte_memseg_list_walk_t func, void *arg,
+		enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	struct rte_memseg_list *memsegs = get_memseg_list_array(mcfg, mem_type);
 	int i, ret = 0;
 
 	for (i = 0; i < RTE_MAX_MEMSEG_LISTS; i++) {
-		struct rte_memseg_list *msl = &mcfg->memsegs[i];
+		struct rte_memseg_list *msl = &memsegs[i];
 
 		if (msl->base_va == NULL)
 			continue;
@@ -775,6 +845,12 @@ rte_memseg_list_walk_thread_unsafe(rte_memseg_list_walk_t func, void *arg)
 			return ret;
 	}
 	return 0;
+}
+
+int
+rte_memseg_list_walk_thread_unsafe(rte_memseg_list_walk_t func, void *arg)
+{
+	return rte_memseg_list_walk_thread_unsafe_select(func, arg, RTE_MEMORY_TYPE_NORMAL);
 }
 
 int

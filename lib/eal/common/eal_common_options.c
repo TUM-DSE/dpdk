@@ -92,6 +92,8 @@ eal_long_options[] = {
 	{OPT_PROC_TYPE,         1, NULL, OPT_PROC_TYPE_NUM        },
 	{OPT_SOCKET_MEM,        1, NULL, OPT_SOCKET_MEM_NUM       },
 	{OPT_SOCKET_LIMIT,      1, NULL, OPT_SOCKET_LIMIT_NUM     },
+	{OPT_CVM_SHARED_SOCKET_MEM, 1, NULL, OPT_CVM_SHARED_SOCKET_MEM_NUM},
+	{OPT_ENABLE_CVM_SHARED_MEMORY, 0, NULL, OPT_ENABLE_CVM_SHARED_MEMORY_NUM},
 #ifndef RTE_EXEC_ENV_WINDOWS
 	{OPT_SYSLOG,            2, NULL, OPT_SYSLOG_NUM           },
 #endif
@@ -342,6 +344,14 @@ eal_reset_internal_config(struct internal_config *internal_cfg)
 	/* zero out the NUMA limits config */
 	for (i = 0; i < RTE_MAX_NUMA_NODES; i++)
 		internal_cfg->socket_limit[i] = 0;
+	/* zero out the CVM shared memory config */
+#ifdef RTE_ENABLE_CVM_SHARED_MEMORY
+	internal_cfg->cvm_shared_memory_enabled = true;
+#else
+	internal_cfg->cvm_shared_memory_enabled = false;
+#endif
+	for (i = 0; i < RTE_MAX_NUMA_NODES; i++)
+		internal_cfg->cvm_shared_socket_mem[i] = 0;
 	/* zero out hugedir descriptors */
 	for (i = 0; i < MAX_HUGEPAGE_SIZES; i++) {
 		memset(&internal_cfg->hugepage_info[i], 0,
@@ -2219,6 +2229,9 @@ eal_common_usage(void)
 	       "  --"OPT_MBUF_POOL_OPS_NAME" Pool ops name for mbuf to use\n"
 	       "  -n CHANNELS         Number of memory channels\n"
 	       "  -m MB               Memory to allocate (see also --"OPT_SOCKET_MEM")\n"
+	       "  --"OPT_ENABLE_CVM_SHARED_MEMORY" Enable CVM shared (decrypted) memory with dynamic allocation\n"
+	       "  --"OPT_CVM_SHARED_SOCKET_MEM" Comma-separated memory in MB for CVM shared per socket\n"
+	       "                      Overrides dynamic allocation (e.g., --cvm-shared-socket-mem=1024,2048)\n"
 	       "  -r RANKS            Force number of memory ranks (don't detect)\n"
 	       "  -b, --block         Add a device to the blocked list.\n"
 	       "                      Prevent EAL from using this device. The argument\n"

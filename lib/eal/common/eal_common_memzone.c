@@ -58,8 +58,21 @@ rte_memzone_max_get(void)
 	return mcfg->max_memzone;
 }
 
+/* Helper to select between normal and CVM shared memzone array */
+static inline struct rte_fbarray *
+get_memzone_fbarray(struct rte_mem_config *mcfg, enum rte_memory_type mem_type)
+{
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return &mcfg->cvm_shared_memzones;
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return &mcfg->memzones;
+	}
+}
+
 static inline const struct rte_memzone *
-memzone_lookup_thread_unsafe(const char *name)
+memzone_lookup_thread_unsafe(const char *name, enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg;
 	struct rte_fbarray *arr;
@@ -68,7 +81,7 @@ memzone_lookup_thread_unsafe(const char *name)
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
-	arr = &mcfg->memzones;
+	arr = get_memzone_fbarray(mcfg, mem_type);
 
 	/*
 	 * the algorithm is not optimal (linear), but there are few
@@ -100,7 +113,7 @@ memzone_lookup_thread_unsafe(const char *name)
 static const struct rte_memzone *
 memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
 		int socket_id, unsigned int flags, unsigned int align,
-		unsigned int bound)
+		unsigned int bound, enum rte_memory_type mem_type)
 {
 	struct rte_memzone *mz;
 	struct rte_mem_config *mcfg;
@@ -112,7 +125,7 @@ memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
-	arr = &mcfg->memzones;
+	arr = get_memzone_fbarray(mcfg, mem_type);
 
 	/* no more room in config */
 	if (arr->count >= arr->len) {
@@ -132,7 +145,7 @@ memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
 	}
 
 	/* zone already exist */
-	if ((memzone_lookup_thread_unsafe(name)) != NULL) {
+	if ((memzone_lookup_thread_unsafe(name, mem_type)) != NULL) {
 		EAL_LOG(DEBUG, "%s(): memzone <%s> already exists",
 			__func__, name);
 		rte_errno = EEXIST;
@@ -191,12 +204,12 @@ memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
 	if (len == 0 && bound == 0) {
 		/* no size constraints were placed, so use malloc elem len */
 		requested_len = 0;
-		mz_addr = malloc_heap_alloc_biggest(socket_id, flags, align, contig);
+		mz_addr = malloc_heap_alloc_biggest(socket_id, flags, align, contig, mem_type);
 	} else {
 		if (len == 0)
 			requested_len = bound;
 		/* allocate memory on heap */
-		mz_addr = malloc_heap_alloc(requested_len, socket_id, flags, align, bound, contig);
+		mz_addr = malloc_heap_alloc(requested_len, socket_id, flags, align, bound, contig, mem_type);
 	}
 	if (mz_addr == NULL) {
 		rte_errno = ENOMEM;
@@ -237,7 +250,7 @@ memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
 
 static const struct rte_memzone *
 rte_memzone_reserve_thread_safe(const char *name, size_t len, int socket_id,
-		unsigned int flags, unsigned int align, unsigned int bound)
+		unsigned int flags, unsigned int align, unsigned int bound, enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg;
 	const struct rte_memzone *mz = NULL;
@@ -248,7 +261,7 @@ rte_memzone_reserve_thread_safe(const char *name, size_t len, int socket_id,
 	rte_rwlock_write_lock(&mcfg->mlock);
 
 	mz = memzone_reserve_aligned_thread_unsafe(
-		name, len, socket_id, flags, align, bound);
+		name, len, socket_id, flags, align, bound, mem_type);
 
 	rte_eal_trace_memzone_reserve(name, len, socket_id, flags, align,
 		bound, mz);
@@ -268,7 +281,7 @@ rte_memzone_reserve_bounded(const char *name, size_t len, int socket_id,
 			    unsigned flags, unsigned align, unsigned bound)
 {
 	return rte_memzone_reserve_thread_safe(name, len, socket_id, flags,
-					       align, bound);
+					       align, bound, RTE_MEMORY_TYPE_NORMAL);
 }
 
 /*
@@ -280,7 +293,7 @@ rte_memzone_reserve_aligned(const char *name, size_t len, int socket_id,
 			    unsigned flags, unsigned align)
 {
 	return rte_memzone_reserve_thread_safe(name, len, socket_id, flags,
-					       align, 0);
+					       align, 0, RTE_MEMORY_TYPE_NORMAL);
 }
 
 /*
@@ -292,11 +305,11 @@ rte_memzone_reserve(const char *name, size_t len, int socket_id,
 		    unsigned flags)
 {
 	return rte_memzone_reserve_thread_safe(name, len, socket_id,
-					       flags, RTE_CACHE_LINE_SIZE, 0);
+					       flags, RTE_CACHE_LINE_SIZE, 0, RTE_MEMORY_TYPE_NORMAL);
 }
 
-int
-rte_memzone_free(const struct rte_memzone *mz)
+static int
+memzone_free_internal(const struct rte_memzone *mz, enum rte_memory_type mem_type)
 {
 	char name[RTE_MEMZONE_NAMESIZE];
 	struct rte_mem_config *mcfg;
@@ -311,7 +324,7 @@ rte_memzone_free(const struct rte_memzone *mz)
 
 	rte_strlcpy(name, mz->name, RTE_MEMZONE_NAMESIZE);
 	mcfg = rte_eal_get_configuration()->mem_config;
-	arr = &mcfg->memzones;
+	arr = get_memzone_fbarray(mcfg, mem_type);
 
 	rte_rwlock_write_lock(&mcfg->mlock);
 
@@ -321,7 +334,8 @@ rte_memzone_free(const struct rte_memzone *mz)
 	if (found_mz == NULL) {
 		ret = -EINVAL;
 	} else if (found_mz->addr == NULL) {
-		EAL_LOG(ERR, "Memzone is not allocated");
+		EAL_LOG(ERR, "%s memzone is not allocated",
+			(mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "CVM shared" : "");
 		ret = -EINVAL;
 	} else {
 		addr = found_mz->addr;
@@ -338,6 +352,12 @@ rte_memzone_free(const struct rte_memzone *mz)
 	return ret;
 }
 
+int
+rte_memzone_free(const struct rte_memzone *mz)
+{
+	return memzone_free_internal(mz, RTE_MEMORY_TYPE_NORMAL);
+}
+
 /*
  * Lookup for the memzone identified by the given name
  */
@@ -351,7 +371,7 @@ rte_memzone_lookup(const char *name)
 
 	rte_rwlock_read_lock(&mcfg->mlock);
 
-	memzone = memzone_lookup_thread_unsafe(name);
+	memzone = memzone_lookup_thread_unsafe(name, RTE_MEMORY_TYPE_NORMAL);
 
 	rte_rwlock_read_unlock(&mcfg->mlock);
 
@@ -452,6 +472,18 @@ rte_eal_memzone_init(void)
 		ret = -1;
 	}
 
+	/* Initialize CVM shared memzones for DMA (decrypted memory) */
+	if (ret == 0 && rte_eal_process_type() == RTE_PROC_PRIMARY &&
+			rte_fbarray_init(&mcfg->cvm_shared_memzones, "cvm_shared_memzone",
+			rte_memzone_max_get(), sizeof(struct rte_memzone))) {
+		EAL_LOG(ERR, "Cannot allocate CVM shared memzone list");
+		ret = -1;
+	} else if (ret == 0 && rte_eal_process_type() == RTE_PROC_SECONDARY &&
+			rte_fbarray_attach(&mcfg->cvm_shared_memzones)) {
+		EAL_LOG(ERR, "Cannot attach to CVM shared memzone list");
+		ret = -1;
+	}
+
 	rte_rwlock_write_unlock(&mcfg->mlock);
 
 	return ret;
@@ -476,4 +508,68 @@ void rte_memzone_walk(void (*func)(const struct rte_memzone *, void *),
 		i = rte_fbarray_find_next_used(arr, i + 1);
 	}
 	rte_rwlock_read_unlock(&mcfg->mlock);
+}
+
+/*
+ * Return a pointer to a correctly filled CVM shared memzone descriptor
+ * (with a specified alignment and boundary). If the allocation cannot be
+ * done, return NULL.
+ */
+const struct rte_memzone *
+rte_cvm_shared_memzone_reserve_bounded(const char *name, size_t len,
+		int socket_id, unsigned flags, unsigned align, unsigned bound)
+{
+	return rte_memzone_reserve_thread_safe(name, len, socket_id,
+			flags, align, bound, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+/*
+ * Return a pointer to a correctly filled CVM shared memzone descriptor
+ * (with a specified alignment). If the allocation cannot be done, return NULL.
+ */
+const struct rte_memzone *
+rte_cvm_shared_memzone_reserve_aligned(const char *name, size_t len,
+		int socket_id, unsigned flags, unsigned align)
+{
+	return rte_memzone_reserve_thread_safe(name, len, socket_id,
+			flags, align, 0, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+/*
+ * Return a pointer to a correctly filled CVM shared memzone descriptor.
+ * If the allocation cannot be done, return NULL.
+ */
+const struct rte_memzone *
+rte_cvm_shared_memzone_reserve(const char *name, size_t len, int socket_id,
+		unsigned flags)
+{
+	return rte_memzone_reserve_thread_safe(name, len, socket_id,
+			flags, RTE_CACHE_LINE_SIZE, 0, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+int
+rte_cvm_shared_memzone_free(const struct rte_memzone *mz)
+{
+	return memzone_free_internal(mz, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+/*
+ * Lookup for the CVM shared memzone identified by the given name
+ */
+const struct rte_memzone *
+rte_cvm_shared_memzone_lookup(const char *name)
+{
+	struct rte_mem_config *mcfg;
+	const struct rte_memzone *memzone = NULL;
+
+	mcfg = rte_eal_get_configuration()->mem_config;
+
+	rte_rwlock_read_lock(&mcfg->mlock);
+
+	memzone = memzone_lookup_thread_unsafe(name, RTE_MEMORY_TYPE_CVM_SHARED);
+
+	rte_rwlock_read_unlock(&mcfg->mlock);
+
+	rte_eal_trace_memzone_lookup(name, memzone);
+	return memzone;
 }

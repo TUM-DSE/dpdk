@@ -326,6 +326,118 @@ void rte_memzone_dump(FILE *f);
 void rte_memzone_walk(void (*func)(const struct rte_memzone *, void *arg),
 		      void *arg);
 
+/**
+ * Reserve a portion of physical memory from CVM shared pool (decrypted for DMA).
+ *
+ * This function reserves memory from a separate pool of CVM shared (decrypted)
+ * memory that can be used for DMA in confidential VMs. The memory is allocated
+ * with MAP_CVM_SHARED flag and is suitable for device DMA operations.
+ *
+ * @param name
+ *   The name of the memzone. If it already exists, the function will
+ *   fail and return NULL.
+ * @param len
+ *   The size of the memory to be reserved. If it is 0, the biggest
+ *   contiguous zone will be reserved.
+ * @param socket_id
+ *   The socket identifier in the case of NUMA. The value can be
+ *   SOCKET_ID_ANY if there is no NUMA constraint for the reserved zone.
+ * @param flags
+ *   The flags parameter is used to request memzones to be taken from
+ *   specifically sized hugepages (same flags as rte_memzone_reserve).
+ * @return
+ *   A pointer to a correctly-filled read-only memzone descriptor, or NULL
+ *   on error. On error case, rte_errno will be set appropriately.
+ */
+const struct rte_memzone *rte_cvm_shared_memzone_reserve(const char *name,
+			size_t len, int socket_id, unsigned flags);
+
+/**
+ * Reserve a portion of physical memory from CVM shared pool with alignment.
+ *
+ * This function reserves memory from the CVM shared (decrypted) pool with
+ * specified alignment. The memory is suitable for DMA operations in
+ * confidential VMs.
+ *
+ * @param name
+ *   The name of the memzone. If it already exists, the function will
+ *   fail and return NULL.
+ * @param len
+ *   The size of the memory to be reserved. If it is 0, the biggest
+ *   contiguous zone will be reserved.
+ * @param socket_id
+ *   The socket identifier in the case of NUMA. The value can be
+ *   SOCKET_ID_ANY if there is no NUMA constraint for the reserved zone.
+ * @param flags
+ *   The flags parameter is used to request memzones to be taken from
+ *   specifically sized hugepages (same flags as rte_memzone_reserve).
+ * @param align
+ *   Alignment for resulting memzone. Must be a power of 2.
+ * @return
+ *   A pointer to a correctly-filled read-only memzone descriptor, or NULL
+ *   on error. On error case, rte_errno will be set appropriately.
+ */
+const struct rte_memzone *rte_cvm_shared_memzone_reserve_aligned(
+			const char *name, size_t len, int socket_id,
+			unsigned flags, unsigned align);
+
+/**
+ * Reserve a portion of physical memory from CVM shared pool with alignment
+ * and boundary.
+ *
+ * This function reserves memory from the CVM shared (decrypted) pool with
+ * specified alignment and boundary. The memory is suitable for DMA operations
+ * in confidential VMs.
+ *
+ * @param name
+ *   The name of the memzone. If it already exists, the function will
+ *   fail and return NULL.
+ * @param len
+ *   The size of the memory to be reserved. If it is 0, the biggest
+ *   contiguous zone will be reserved.
+ * @param socket_id
+ *   The socket identifier in the case of NUMA. The value can be
+ *   SOCKET_ID_ANY if there is no NUMA constraint for the reserved zone.
+ * @param flags
+ *   The flags parameter is used to request memzones to be taken from
+ *   specifically sized hugepages (same flags as rte_memzone_reserve).
+ * @param align
+ *   Alignment for resulting memzone. Must be a power of 2.
+ * @param bound
+ *   Boundary for resulting memzone. Must be a power of 2 or zero.
+ *   Zero value implies no boundary condition.
+ * @return
+ *   A pointer to a correctly-filled read-only memzone descriptor, or NULL
+ *   on error. On error case, rte_errno will be set appropriately.
+ */
+const struct rte_memzone *rte_cvm_shared_memzone_reserve_bounded(
+			const char *name, size_t len, int socket_id,
+			unsigned flags, unsigned align, unsigned bound);
+
+/**
+ * Free a CVM shared memzone.
+ *
+ * @param mz
+ *   A pointer to the CVM shared memzone
+ * @return
+ *  -EINVAL - invalid parameter.
+ *  0 - success
+ */
+int rte_cvm_shared_memzone_free(const struct rte_memzone *mz);
+
+/**
+ * Lookup for a CVM shared memzone.
+ *
+ * Get a pointer to a descriptor of an already reserved CVM shared memory
+ * zone identified by the name given as an argument.
+ *
+ * @param name
+ *   The name of the memzone.
+ * @return
+ *   A pointer to a read-only memzone descriptor.
+ */
+const struct rte_memzone *rte_cvm_shared_memzone_lookup(const char *name);
+
 #ifdef __cplusplus
 }
 #endif

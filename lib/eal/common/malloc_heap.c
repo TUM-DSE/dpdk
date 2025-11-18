@@ -18,6 +18,7 @@
 #include <rte_spinlock.h>
 #include <rte_memzone.h>
 #include <rte_fbarray.h>
+#include <inttypes.h>
 
 #include "eal_internal_cfg.h"
 #include "eal_memalloc.h"
@@ -68,14 +69,73 @@ check_hugepage_sz(unsigned flags, uint64_t hugepage_sz)
 	return check_flag & flags;
 }
 
-int
-malloc_socket_to_heap_id(unsigned int socket_id)
+/* Helper to get the full heap array based on memory type */
+static inline struct malloc_heap *
+get_malloc_heap_array(struct rte_mem_config *mcfg, enum rte_memory_type mem_type)
+{
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return mcfg->cvm_shared_malloc_heaps;
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return mcfg->malloc_heaps;
+	}
+}
+
+/* Helper to select between normal and CVM shared heap */
+static inline struct malloc_heap *
+get_malloc_heap(unsigned int heap_id, enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return &mcfg->cvm_shared_malloc_heaps[heap_id];
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return &mcfg->malloc_heaps[heap_id];
+	}
+}
+
+/* Helper to determine memory type from heap pointer */
+static inline enum rte_memory_type
+get_heap_memory_type(const struct malloc_heap *heap, const struct rte_mem_config *mcfg)
+{
+	/* Validate heap is within cvm_shared_malloc_heaps array */
+	if (heap >= mcfg->cvm_shared_malloc_heaps &&
+	    heap < &mcfg->cvm_shared_malloc_heaps[RTE_MAX_HEAPS])
+		return RTE_MEMORY_TYPE_CVM_SHARED;
+
+	/* Validate heap is within malloc_heaps array */
+	if (heap >= mcfg->malloc_heaps &&
+	    heap < &mcfg->malloc_heaps[RTE_MAX_HEAPS])
+		return RTE_MEMORY_TYPE_NORMAL;
+
+	/* Heap pointer is not in either valid array - log error and return safe default */
+	return RTE_MEMORY_TYPE_NORMAL;
+}
+
+/* Helper to select between normal and CVM shared memseg list array */
+static inline struct rte_memseg_list *
+get_memseg_list_array(struct rte_mem_config *mcfg, enum rte_memory_type mem_type)
+{
+	switch (mem_type) {
+	case RTE_MEMORY_TYPE_CVM_SHARED:
+		return mcfg->cvm_shared_memsegs;
+	case RTE_MEMORY_TYPE_NORMAL:
+	default:
+		return mcfg->memsegs;
+	}
+}
+
+int
+malloc_socket_to_heap_id(unsigned int socket_id, enum rte_memory_type mem_type)
+{
+	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	struct malloc_heap *heap_array = get_malloc_heap_array(mcfg, mem_type);
 	int i;
 
 	for (i = 0; i < RTE_MAX_HEAPS; i++) {
-		struct malloc_heap *heap = &mcfg->malloc_heaps[i];
+		struct malloc_heap *heap = &heap_array[i];
 
 		if (heap->socket_id == socket_id)
 			return i;
@@ -103,41 +163,64 @@ malloc_heap_add_memory(struct malloc_heap *heap, struct rte_memseg_list *msl,
 	return elem;
 }
 
+/* Internal unified function for both regular and CVM shared segment addition */
 static int
-malloc_add_seg(const struct rte_memseg_list *msl,
-		const struct rte_memseg *ms, size_t len, void *arg __rte_unused)
+malloc_add_seg_internal(const struct rte_memseg_list *msl,
+		const struct rte_memseg *ms, size_t len, void *arg __rte_unused,
+		enum rte_memory_type mem_type)
 {
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
 	struct rte_memseg_list *found_msl;
 	struct malloc_heap *heap;
+	struct rte_memseg_list *memsegs_array;
+	struct malloc_heap *heap_array;
 	int msl_idx, heap_idx;
+	const char *heap_type;
 
 	if (msl->external)
 		return 0;
 
-	heap_idx = malloc_socket_to_heap_id(msl->socket_id);
+	/* Select appropriate arrays and type string */
+	if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) {
+		memsegs_array = mcfg->cvm_shared_memsegs;
+		heap_array = mcfg->cvm_shared_malloc_heaps;
+		heap_type = "CVM shared ";
+	} else {
+		memsegs_array = mcfg->memsegs;
+		heap_array = mcfg->malloc_heaps;
+		heap_type = "";
+	}
+
+	heap_idx = malloc_socket_to_heap_id(msl->socket_id, mem_type);
 	if (heap_idx < 0) {
-		EAL_LOG(ERR, "Memseg list has invalid socket id");
+		EAL_LOG(ERR, "%smemseg list has invalid socket id", heap_type);
 		return -1;
 	}
-	heap = &mcfg->malloc_heaps[heap_idx];
+	heap = &heap_array[heap_idx];
 
 	/* msl is const, so find it */
-	msl_idx = msl - mcfg->memsegs;
+	msl_idx = msl - memsegs_array;
 
 	if (msl_idx < 0 || msl_idx >= RTE_MAX_MEMSEG_LISTS)
 		return -1;
 
-	found_msl = &mcfg->memsegs[msl_idx];
+	found_msl = &memsegs_array[msl_idx];
 
 	malloc_heap_add_memory(heap, found_msl, ms->addr, len,
 			ms->flags & RTE_MEMSEG_FLAG_DIRTY);
 
 	heap->total_size += len;
 
-	EAL_LOG(DEBUG, "Added %zuM to heap on socket %i", len >> 20,
-			msl->socket_id);
+	EAL_LOG(DEBUG, "Added %s%zuM to heap on socket %i", heap_type,
+			len >> 20, msl->socket_id);
 	return 0;
+}
+
+static int
+malloc_add_seg(const struct rte_memseg_list *msl,
+		const struct rte_memseg *ms, size_t len, void *arg __rte_unused)
+{
+	return malloc_add_seg_internal(msl, ms, len, arg, RTE_MEMORY_TYPE_NORMAL);
 }
 
 /*
@@ -300,6 +383,7 @@ alloc_pages_on_heap(struct malloc_heap *heap, uint64_t pg_sz, size_t elt_size,
 	size_t alloc_sz;
 	int allocd_pages, i;
 	bool dirty = false;
+	enum rte_memory_type mem_type;
 	void *ret, *map_addr;
 
 	alloc_sz = (size_t)pg_sz * n_segs;
@@ -311,8 +395,10 @@ alloc_pages_on_heap(struct malloc_heap *heap, uint64_t pg_sz, size_t elt_size,
 		return NULL;
 	}
 
-	allocd_pages = eal_memalloc_alloc_seg_bulk(ms, n_segs, pg_sz,
-			socket, true);
+	/* Determine if this heap is a CVM shared heap */
+	mem_type = get_heap_memory_type(heap, mcfg);
+
+	allocd_pages = eal_memalloc_alloc_seg_bulk(ms, n_segs, pg_sz, socket, true, mem_type);
 
 	/* make sure we've allocated our pages... */
 	if (allocd_pages < 0)
@@ -544,6 +630,12 @@ alloc_more_mem_on_socket(struct malloc_heap *heap, size_t size, int socket,
 	bool size_hint = (flags & RTE_MEMZONE_SIZE_HINT_ONLY) > 0;
 	unsigned int size_flags = flags & ~RTE_MEMZONE_SIZE_HINT_ONLY;
 	void *ret;
+	enum rte_memory_type mem_type;
+	struct rte_memseg_list *memsegs_array;
+
+	/* Determine if this heap is a CVM shared heap */
+	mem_type = get_heap_memory_type(heap, mcfg);
+	memsegs_array = get_memseg_list_array(mcfg, mem_type);
 
 	memset(requested_msls, 0, sizeof(requested_msls));
 	memset(other_msls, 0, sizeof(other_msls));
@@ -557,7 +649,7 @@ alloc_more_mem_on_socket(struct malloc_heap *heap, size_t size, int socket,
 	n_requested_msls = 0;
 	n_other_msls = 0;
 	for (i = 0; i < RTE_MAX_MEMSEG_LISTS; i++) {
-		struct rte_memseg_list *msl = &mcfg->memsegs[i];
+		struct rte_memseg_list *msl = &memsegs_array[i];
 
 		if (msl->socket_id != socket)
 			continue;
@@ -640,10 +732,9 @@ alloc_more_mem_on_socket(struct malloc_heap *heap, size_t size, int socket,
 /* this will try lower page sizes first */
 static void *
 malloc_heap_alloc_on_heap_id(size_t size, unsigned int heap_id, unsigned int flags, size_t align,
-		size_t bound, bool contig)
+		size_t bound, bool contig, enum rte_memory_type mem_type)
 {
-	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
-	struct malloc_heap *heap = &mcfg->malloc_heaps[heap_id];
+	struct malloc_heap *heap = get_malloc_heap(heap_id, mem_type);
 	unsigned int size_flags = flags & ~RTE_MEMZONE_SIZE_HINT_ONLY;
 	int socket_id;
 	void *ret;
@@ -729,7 +820,7 @@ malloc_get_numa_socket(void)
 
 void *
 malloc_heap_alloc(size_t size, int socket_arg, unsigned int flags,
-		  size_t align, size_t bound, bool contig)
+		  size_t align, size_t bound, bool contig, enum rte_memory_type mem_type)
 {
 	int socket, heap_id, i;
 	void *ret;
@@ -747,12 +838,12 @@ malloc_heap_alloc(size_t size, int socket_arg, unsigned int flags,
 		socket = socket_arg;
 
 	/* turn socket ID into heap ID */
-	heap_id = malloc_socket_to_heap_id(socket);
+	heap_id = malloc_socket_to_heap_id(socket, mem_type);
 	/* if heap id is negative, socket ID was invalid */
 	if (heap_id < 0)
 		return NULL;
 
-	ret = malloc_heap_alloc_on_heap_id(size, heap_id, flags, align, bound, contig);
+	ret = malloc_heap_alloc_on_heap_id(size, heap_id, flags, align, bound, contig, mem_type);
 	if (ret != NULL || socket_arg != SOCKET_ID_ANY)
 		return ret;
 
@@ -762,7 +853,7 @@ malloc_heap_alloc(size_t size, int socket_arg, unsigned int flags,
 	for (i = 0; i < (int) rte_socket_count(); i++) {
 		if (i == heap_id)
 			continue;
-		ret = malloc_heap_alloc_on_heap_id(size, i, flags, align, bound, contig);
+		ret = malloc_heap_alloc_on_heap_id(size, i, flags, align, bound, contig, mem_type);
 		if (ret != NULL)
 			return ret;
 	}
@@ -771,10 +862,9 @@ malloc_heap_alloc(size_t size, int socket_arg, unsigned int flags,
 
 static void *
 heap_alloc_biggest_on_heap_id(unsigned int heap_id,
-		unsigned int flags, size_t align, bool contig)
+		unsigned int flags, size_t align, bool contig, enum rte_memory_type mem_type)
 {
-	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
-	struct malloc_heap *heap = &mcfg->malloc_heaps[heap_id];
+	struct malloc_heap *heap = get_malloc_heap(heap_id, mem_type);
 	void *ret;
 
 	rte_spinlock_lock(&(heap->lock));
@@ -789,7 +879,7 @@ heap_alloc_biggest_on_heap_id(unsigned int heap_id,
 }
 
 void *
-malloc_heap_alloc_biggest(int socket_arg, unsigned int flags, size_t align, bool contig)
+malloc_heap_alloc_biggest(int socket_arg, unsigned int flags, size_t align, bool contig, enum rte_memory_type mem_type)
 {
 	int socket, i, cur_socket, heap_id;
 	void *ret;
@@ -807,12 +897,12 @@ malloc_heap_alloc_biggest(int socket_arg, unsigned int flags, size_t align, bool
 		socket = socket_arg;
 
 	/* turn socket ID into heap ID */
-	heap_id = malloc_socket_to_heap_id(socket);
+	heap_id = malloc_socket_to_heap_id(socket, mem_type);
 	/* if heap id is negative, socket ID was invalid */
 	if (heap_id < 0)
 		return NULL;
 
-	ret = heap_alloc_biggest_on_heap_id(heap_id, flags, align, contig);
+	ret = heap_alloc_biggest_on_heap_id(heap_id, flags, align, contig, mem_type);
 	if (ret != NULL || socket_arg != SOCKET_ID_ANY)
 		return ret;
 
@@ -821,7 +911,7 @@ malloc_heap_alloc_biggest(int socket_arg, unsigned int flags, size_t align, bool
 		cur_socket = rte_socket_id_by_idx(i);
 		if (cur_socket == socket)
 			continue;
-		ret = heap_alloc_biggest_on_heap_id(i, flags, align, contig);
+		ret = heap_alloc_biggest_on_heap_id(i, flags, align, contig, mem_type);
 		if (ret != NULL)
 			return ret;
 	}
@@ -1421,6 +1511,18 @@ rte_eal_malloc_heap_init(void)
 			strlcpy(heap->name, heap_name, RTE_HEAP_NAME_MAX_LEN);
 			heap->socket_id = socket_id;
 		}
+
+		/* Initialize CVM shared heaps for DMA (decrypted memory) */
+		for (i = 0; i < rte_socket_count(); i++) {
+			struct malloc_heap *heap = &mcfg->cvm_shared_malloc_heaps[i];
+			char heap_name[RTE_HEAP_NAME_MAX_LEN];
+			int socket_id = rte_socket_id_by_idx(i);
+
+			snprintf(heap_name, sizeof(heap_name),
+					"cvm_shared_socket_%i", socket_id);
+			strlcpy(heap->name, heap_name, RTE_HEAP_NAME_MAX_LEN);
+			heap->socket_id = socket_id;
+		}
 	}
 
 	if (register_mp_requests()) {
@@ -1431,7 +1533,19 @@ rte_eal_malloc_heap_init(void)
 	return 0;
 }
 
-int rte_eal_malloc_heap_populate(void)
+/* Extern declaration for parametrized walk function from eal_common_memory.c */
+extern int
+rte_memseg_contig_walk_thread_unsafe_select(rte_memseg_contig_walk_t func, void *arg,
+		enum rte_memory_type mem_type);
+
+/* Forward declaration for wrapper callback */
+static int
+malloc_add_seg_internal_wrapper(const struct rte_memseg_list *msl,
+		const struct rte_memseg *ms, size_t len, void *arg __rte_unused);
+
+/* Internal helper to populate heaps with appropriate memseg array */
+static int
+rte_eal_malloc_heap_populate_internal(enum rte_memory_type mem_type)
 {
 	/* mem hotplug is unlocked here. it's safe for primary as no requests can
 	 * even come before primary itself is fully initialized, and secondaries
@@ -1443,7 +1557,26 @@ int rte_eal_malloc_heap_populate(void)
 		return 0;
 
 	/* add all IOVA-contiguous areas to the heap */
-	return rte_memseg_contig_walk(malloc_add_seg, NULL);
+	if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) {
+		return rte_memseg_contig_walk_thread_unsafe_select(
+				malloc_add_seg_internal_wrapper, NULL, RTE_MEMORY_TYPE_CVM_SHARED);
+	} else {
+		return rte_memseg_contig_walk(malloc_add_seg, NULL);
+	}
+}
+
+/* Wrapper callback for CVM shared that passes RTE_MEMORY_TYPE_CVM_SHARED to malloc_add_seg_internal */
+static int
+malloc_add_seg_internal_wrapper(const struct rte_memseg_list *msl,
+		const struct rte_memseg *ms, size_t len, void *arg __rte_unused)
+{
+	return malloc_add_seg_internal(msl, ms, len, arg, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+int rte_eal_malloc_heap_populate(void)
+{
+	return rte_eal_malloc_heap_populate_internal(RTE_MEMORY_TYPE_NORMAL) &&
+		rte_eal_malloc_heap_populate_internal(RTE_MEMORY_TYPE_CVM_SHARED);
 }
 
 void

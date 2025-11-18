@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+#include <rte_memory.h>
 #include <rte_string_fns.h>
 #include "eal_internal_cfg.h"
 
@@ -89,11 +90,17 @@ eal_hugepage_data_path(void)
 
 /** String format for hugepage map files. */
 #define HUGEFILE_FMT "%s/%smap_%d"
+#define HUGEFILE_FMT_CVM_SHARED "%s/%smap_cvm_%d"
 static inline const char *
-eal_get_hugefile_path(char *buffer, size_t buflen, const char *hugedir, int f_id)
+eal_get_hugefile_path(char *buffer, size_t buflen, const char *hugedir, int f_id,
+		enum rte_memory_type mem_type)
 {
-	snprintf(buffer, buflen, HUGEFILE_FMT, hugedir,
-			eal_get_hugefile_prefix(), f_id);
+	if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+		snprintf(buffer, buflen, HUGEFILE_FMT_CVM_SHARED, hugedir,
+				eal_get_hugefile_prefix(), f_id);
+	else
+		snprintf(buffer, buflen, HUGEFILE_FMT, hugedir,
+				eal_get_hugefile_prefix(), f_id);
 	return buffer;
 }
 

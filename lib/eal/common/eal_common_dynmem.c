@@ -17,16 +17,96 @@
 
 /** @file Functions common to EALs that support dynamic memory allocation. */
 
+/* Memory type descriptor for segment list initialization */
+struct memtype {
+	uint64_t page_sz;
+	int socket_id;
+};
+
+/*
+ * Helper function to create memseg lists for a specific memory type.
+ * Encapsulates the common logic for both normal and CVM shared memory initialization.
+ */
+static int
+create_memseg_lists_for_type(struct memtype *memtypes, unsigned int n_memtypes,
+		struct rte_memseg_list *memseg_array, int *msl_idx_ptr,
+		uint64_t max_mem_per_type, unsigned int max_seglists_per_type,
+		enum rte_memory_type mem_type)
+{
+	unsigned int cur_type;
+	const char *type_str = (mem_type == RTE_MEMORY_TYPE_CVM_SHARED) ? "CVM shared " : "";
+
+	/* Go through all mem types and create segment lists */
+	for (cur_type = 0; cur_type < n_memtypes; cur_type++) {
+		unsigned int cur_seglist, n_seglists, n_segs;
+		unsigned int max_segs_per_type, max_segs_per_list;
+		struct memtype *type = &memtypes[cur_type];
+		uint64_t max_mem_per_list, pagesz;
+		int socket_id;
+
+		pagesz = type->page_sz;
+		socket_id = type->socket_id;
+
+
+		/* Calculate how much segments we will need in total */
+		max_segs_per_type = max_mem_per_type / pagesz;
+		/* Limit number of segments to maximum allowed per type */
+		max_segs_per_type = RTE_MIN(max_segs_per_type,
+				(unsigned int)RTE_MAX_MEMSEG_PER_TYPE);
+		/* Limit number of segments to maximum allowed per list */
+		max_segs_per_list = RTE_MIN(max_segs_per_type,
+				(unsigned int)RTE_MAX_MEMSEG_PER_LIST);
+
+		/* Calculate how much memory we can have per segment list */
+		max_mem_per_list = RTE_MIN(max_segs_per_list * pagesz,
+				(uint64_t)RTE_MAX_MEM_MB_PER_LIST << 20);
+
+		/* Calculate how many segments each segment list will have */
+		n_segs = RTE_MIN(max_segs_per_list, max_mem_per_list / pagesz);
+
+		/* Calculate how many segment lists we can have */
+		n_seglists = RTE_MIN(max_segs_per_type / n_segs,
+				max_mem_per_type / max_mem_per_list);
+
+		/* Limit number of segment lists according to our maximum */
+		n_seglists = RTE_MIN(n_seglists, max_seglists_per_type);
+
+		EAL_LOG(DEBUG, "Creating %u %ssegment lists: "
+				"n_segs:%u socket_id:%d hugepage_sz:%" PRIu64,
+			n_seglists, type_str, n_segs, socket_id, pagesz);
+
+		/* Create all segment lists */
+		for (cur_seglist = 0; cur_seglist < n_seglists; cur_seglist++) {
+			struct rte_memseg_list *msl;
+
+			if (*msl_idx_ptr >= RTE_MAX_MEMSEG_LISTS) {
+				EAL_LOG(ERR, "No more space in %smemseg lists", type_str);
+				return -1;
+			}
+
+			msl = &memseg_array[(*msl_idx_ptr)++];
+
+			if (eal_memseg_list_init(msl, pagesz, n_segs,
+					socket_id, cur_seglist, true, mem_type))
+				return -1;
+
+			if (eal_memseg_list_alloc(msl, 0)) {
+				EAL_LOG(ERR, "Cannot allocate VA space for %smemseg list",
+					type_str);
+				return -1;
+			}
+		}
+	}
+
+	return 0;
+}
+
 int
 eal_dynmem_memseg_lists_init(void)
 {
 	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
-	struct memtype {
-		uint64_t page_sz;
-		int socket_id;
-	} *memtypes = NULL;
+	struct memtype *memtypes = NULL;
 	int i, hpi_idx, msl_idx, ret = -1; /* fail unless told to succeed */
-	struct rte_memseg_list *msl;
 	uint64_t max_mem, max_mem_per_type;
 	unsigned int max_seglists_per_type;
 	unsigned int n_memtypes, cur_type;
@@ -119,81 +199,36 @@ eal_dynmem_memseg_lists_init(void)
 	 */
 	max_seglists_per_type = RTE_MAX_MEMSEG_LISTS / n_memtypes;
 
+	if (internal_conf->cvm_shared_memory_enabled) {
+		/* further divide limits between normal and CVM shared memory */
+		max_mem_per_type /= 2;
+		max_seglists_per_type /= 2;
+	}
+
 	if (max_seglists_per_type == 0) {
 		EAL_LOG(ERR, "Cannot accommodate all memory types, please increase RTE_MAX_MEMSEG_LISTS");
 		goto out;
 	}
 
-	/* go through all mem types and create segment lists */
-	msl_idx = 0;
-	for (cur_type = 0; cur_type < n_memtypes; cur_type++) {
-		unsigned int cur_seglist, n_seglists, n_segs;
-		unsigned int max_segs_per_type, max_segs_per_list;
-		struct memtype *type = &memtypes[cur_type];
-		uint64_t max_mem_per_list, pagesz;
-		int socket_id;
-
-		pagesz = type->page_sz;
-		socket_id = type->socket_id;
-
-		/*
-		 * we need to create segment lists for this type. we must take
-		 * into account the following things:
-		 *
-		 * 1. total amount of memory we can use for this memory type
-		 * 2. total amount of memory per memseg list allowed
-		 * 3. number of segments needed to fit the amount of memory
-		 * 4. number of segments allowed per type
-		 * 5. number of segments allowed per memseg list
-		 * 6. number of memseg lists we are allowed to take up
-		 */
-
-		/* calculate how much segments we will need in total */
-		max_segs_per_type = max_mem_per_type / pagesz;
-		/* limit number of segments to maximum allowed per type */
-		max_segs_per_type = RTE_MIN(max_segs_per_type,
-				(unsigned int)RTE_MAX_MEMSEG_PER_TYPE);
-		/* limit number of segments to maximum allowed per list */
-		max_segs_per_list = RTE_MIN(max_segs_per_type,
-				(unsigned int)RTE_MAX_MEMSEG_PER_LIST);
-
-		/* calculate how much memory we can have per segment list */
-		max_mem_per_list = RTE_MIN(max_segs_per_list * pagesz,
-				(uint64_t)RTE_MAX_MEM_MB_PER_LIST << 20);
-
-		/* calculate how many segments each segment list will have */
-		n_segs = RTE_MIN(max_segs_per_list, max_mem_per_list / pagesz);
-
-		/* calculate how many segment lists we can have */
-		n_seglists = RTE_MIN(max_segs_per_type / n_segs,
-				max_mem_per_type / max_mem_per_list);
-
-		/* limit number of segment lists according to our maximum */
-		n_seglists = RTE_MIN(n_seglists, max_seglists_per_type);
-
-		EAL_LOG(DEBUG, "Creating %i segment lists: "
-				"n_segs:%i socket_id:%i hugepage_sz:%" PRIu64,
-			n_seglists, n_segs, socket_id, pagesz);
-
-		/* create all segment lists */
-		for (cur_seglist = 0; cur_seglist < n_seglists; cur_seglist++) {
-			if (msl_idx >= RTE_MAX_MEMSEG_LISTS) {
-				EAL_LOG(ERR,
-					"No more space in memseg lists, please increase RTE_MAX_MEMSEG_LISTS");
-				goto out;
-			}
-			msl = &mcfg->memsegs[msl_idx++];
-
-			if (eal_memseg_list_init(msl, pagesz, n_segs,
-					socket_id, cur_seglist, true))
-				goto out;
-
-			if (eal_memseg_list_alloc(msl, 0)) {
-				EAL_LOG(ERR, "Cannot allocate VA space for memseg list");
-				goto out;
-			}
-		}
+	/* Create CVM shared memory segment lists if enabled */
+	if (internal_conf->cvm_shared_memory_enabled) {
+		int cvm_msl_idx = 0;
+		if (create_memseg_lists_for_type(memtypes, n_memtypes,
+				mcfg->cvm_shared_memsegs, &cvm_msl_idx,
+				max_mem_per_type, max_seglists_per_type,
+				RTE_MEMORY_TYPE_CVM_SHARED) < 0)
+			goto out;
 	}
+
+	/* Create normal memory segment lists */
+	msl_idx = 0;
+	if (create_memseg_lists_for_type(memtypes, n_memtypes,
+			mcfg->memsegs, &msl_idx,
+			max_mem_per_type, max_seglists_per_type,
+			RTE_MEMORY_TYPE_NORMAL) < 0)
+		goto out;
+
+
 	/* we're successful */
 	ret = 0;
 out:
@@ -222,16 +257,28 @@ limits_callback(int socket_id, size_t cur_limit, size_t new_len)
 	return -1;
 }
 
-int
-eal_dynmem_hugepage_init(void)
+/* Internal unified function for both regular and CVM shared hugepage initialization */
+static int
+hugepage_init_internal(enum rte_memory_type mem_type_arg)
 {
 	struct hugepage_info used_hp[MAX_HUGEPAGE_SIZES];
 	uint64_t memory[RTE_MAX_NUMA_NODES];
 	int hp_sz_idx, socket_id;
 	struct internal_config *internal_conf =
 		eal_get_internal_configuration();
+	const volatile uint64_t *socket_mem_config;
+	const char *mem_type;
 
 	memset(used_hp, 0, sizeof(used_hp));
+
+	/* Select appropriate memory configuration */
+	if (mem_type_arg == RTE_MEMORY_TYPE_CVM_SHARED) {
+		socket_mem_config = internal_conf->cvm_shared_socket_mem;
+		mem_type = "CVM shared ";
+	} else {
+		socket_mem_config = internal_conf->socket_mem;
+		mem_type = "";
+	}
 
 	for (hp_sz_idx = 0;
 			hp_sz_idx < (int) internal_conf->num_hugepage_sizes;
@@ -248,25 +295,28 @@ eal_dynmem_hugepage_init(void)
 #ifndef RTE_ARCH_64
 		/* for 32-bit, limit number of pages on socket to whatever we've
 		 * preallocated, as we cannot allocate more.
+		 * Note: Only applicable for regular memory, not CVM shared.
 		 */
-		memset(&dummy, 0, sizeof(dummy));
-		dummy.hugepage_sz = hpi->hugepage_sz;
-		/*  memory_hotplug_lock is held during initialization, so it's
-		 *  safe to call thread-unsafe version.
-		 */
-		if (rte_memseg_list_walk_thread_unsafe(hugepage_count_walk, &dummy) < 0)
-			return -1;
+		if (mem_type_arg != RTE_MEMORY_TYPE_CVM_SHARED) {
+			memset(&dummy, 0, sizeof(dummy));
+			dummy.hugepage_sz = hpi->hugepage_sz;
+			/*  memory_hotplug_lock is held during initialization, so it's
+			 *  safe to call thread-unsafe version.
+			 */
+			if (rte_memseg_list_walk_thread_unsafe(hugepage_count_walk, &dummy) < 0)
+				return -1;
 
-		for (i = 0; i < RTE_DIM(dummy.num_pages); i++) {
-			hpi->num_pages[i] = RTE_MIN(hpi->num_pages[i],
-					dummy.num_pages[i]);
+			for (i = 0; i < RTE_DIM(dummy.num_pages); i++) {
+				hpi->num_pages[i] = RTE_MIN(hpi->num_pages[i],
+						dummy.num_pages[i]);
+			}
 		}
 #endif
 	}
 
 	/* make a copy of socket_mem, needed for balanced allocation. */
 	for (hp_sz_idx = 0; hp_sz_idx < RTE_MAX_NUMA_NODES; hp_sz_idx++)
-		memory[hp_sz_idx] = internal_conf->socket_mem[hp_sz_idx];
+		memory[hp_sz_idx] = socket_mem_config[hp_sz_idx];
 
 	/* calculate final number of pages */
 	if (eal_dynmem_calc_num_pages_per_socket(memory,
@@ -288,9 +338,9 @@ eal_dynmem_hugepage_init(void)
 				continue;
 
 			EAL_LOG(DEBUG,
-				"Allocating %u pages of size %" PRIu64 "M "
+				"Allocating %u %spages of size %" PRIu64 "M "
 				"on socket %i",
-				num_pages, hpi->hugepage_sz >> 20, socket_id);
+				num_pages, mem_type, hpi->hugepage_sz >> 20, socket_id);
 
 			/* we may not be able to allocate all pages in one go,
 			 * because we break up our memory map into multiple
@@ -307,14 +357,14 @@ eal_dynmem_hugepage_init(void)
 
 				pages = malloc(sizeof(*pages) * needed);
 				if (pages == NULL) {
-					EAL_LOG(ERR, "Failed to malloc pages");
+					EAL_LOG(ERR, "Failed to malloc %spages", mem_type);
 					return -1;
 				}
 
 				/* do not request exact number of pages */
-				cur_pages = eal_memalloc_alloc_seg_bulk(pages,
-						needed, hpi->hugepage_sz,
-						socket_id, false);
+				cur_pages = eal_memalloc_alloc_seg_bulk(pages, needed,
+						hpi->hugepage_sz,
+						socket_id, false, mem_type_arg);
 				if (cur_pages <= 0) {
 					free(pages);
 					return -1;
@@ -333,8 +383,8 @@ eal_dynmem_hugepage_init(void)
 		}
 	}
 
-	/* if socket limits were specified, set them */
-	if (internal_conf->force_socket_limits) {
+	/* if socket limits were specified, set them (only for regular memory) */
+	if (mem_type_arg != RTE_MEMORY_TYPE_CVM_SHARED && internal_conf->force_socket_limits) {
 		unsigned int i;
 		for (i = 0; i < RTE_MAX_NUMA_NODES; i++) {
 			uint64_t limit = internal_conf->socket_limit[i];
@@ -346,6 +396,12 @@ eal_dynmem_hugepage_init(void)
 		}
 	}
 	return 0;
+}
+
+int
+eal_dynmem_hugepage_init(void)
+{
+	return hugepage_init_internal(RTE_MEMORY_TYPE_NORMAL);
 }
 
 __rte_unused /* function is unused on 32-bit builds */
@@ -527,4 +583,10 @@ eal_dynmem_calc_num_pages_per_socket(
 		return -1;
 	}
 	return total_num_pages;
+}
+
+int
+eal_cvm_shared_hugepage_init(void)
+{
+	return hugepage_init_internal(RTE_MEMORY_TYPE_CVM_SHARED);
 }

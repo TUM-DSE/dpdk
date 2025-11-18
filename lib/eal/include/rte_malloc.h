@@ -545,6 +545,124 @@ rte_malloc_dump_heaps(FILE *f);
 rte_iova_t
 rte_malloc_virt2iova(const void *addr);
 
+/**
+ * CVM Shared Memory Allocation APIs
+ *
+ * These functions allocate memory from CVM shared (decrypted) hugepages
+ * suitable for DMA operations in AMD SEV-SNP Confidential VMs.
+ * Memory is allocated using MAP_CVM_SHARED flag.
+ */
+
+/**
+ * Allocate CVM shared memory (decrypted for DMA).
+ *
+ * @param type
+ *   A string identifying the type of allocated objects.
+ * @param size
+ *   Size (in bytes) to be allocated.
+ * @param align
+ *   Alignment requirement.
+ * @return
+ *   Pointer to allocated CVM shared memory, or NULL on error.
+ */
+void *
+rte_cvm_shared_malloc(const char *type, size_t size, unsigned align)
+	__rte_alloc_size(2) __rte_alloc_align(3)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Allocate CVM shared memory on specified NUMA socket (decrypted for DMA).
+ *
+ * @param type
+ *   A string identifying the type of allocated objects.
+ * @param size
+ *   Size (in bytes) to be allocated.
+ * @param align
+ *   Alignment requirement.
+ * @param socket
+ *   NUMA socket to allocate from.
+ * @return
+ *   Pointer to allocated CVM shared memory, or NULL on error.
+ */
+void *
+rte_cvm_shared_malloc_socket(const char *type, size_t size, unsigned align, int socket)
+	__rte_alloc_size(2) __rte_alloc_align(3)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Allocate zeroed CVM shared memory (decrypted for DMA).
+ */
+void *
+rte_cvm_shared_zmalloc(const char *type, size_t size, unsigned align)
+	__rte_alloc_size(2) __rte_alloc_align(3)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Allocate zeroed CVM shared memory on specified NUMA socket (decrypted for DMA).
+ */
+void *
+rte_cvm_shared_zmalloc_socket(const char *type, size_t size, unsigned align, int socket)
+	__rte_alloc_size(2) __rte_alloc_align(3)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Allocate CVM shared memory for an array (decrypted for DMA).
+ */
+void *
+rte_cvm_shared_calloc(const char *type, size_t num, size_t size, unsigned align)
+	__rte_alloc_size(2, 3) __rte_alloc_align(4)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Allocate CVM shared memory for an array on specified NUMA socket (decrypted for DMA).
+ */
+void *
+rte_cvm_shared_calloc_socket(const char *type, size_t num, size_t size, unsigned align, int socket)
+	__rte_alloc_size(2, 3) __rte_alloc_align(4)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Reallocate CVM shared memory (decrypted for DMA).
+ */
+void *
+rte_cvm_shared_realloc(void *ptr, size_t size, unsigned align)
+	__rte_alloc_size(2) __rte_alloc_align(3)
+	__rte_alloc_align(3) __rte_dealloc_free;
+
+/**
+ * Reallocate CVM shared memory on specified NUMA socket (decrypted for DMA).
+ */
+
+void *
+rte_cvm_shared_realloc_socket(void *ptr, size_t size, unsigned int align, int socket)
+	__rte_alloc_size(2) __rte_alloc_align(3)
+	__rte_malloc __rte_dealloc_free;
+
+/**
+ * Free CVM shared memory.
+ * Can also use rte_free() for CVM shared memory.
+ */
+void
+rte_cvm_shared_free(void *ptr);
+
+/**
+ * Allocate the biggest available CVM shared memory block.
+ *
+ * @param socket
+ *   NUMA socket to allocate from
+ * @param flags
+ *   Flags for memory allocation (page size hints)
+ * @param align
+ *   Required alignment (must be power of 2)
+ * @param contig
+ *   True if IOVA-contiguous memory is required
+ * @return
+ *   Pointer to allocated memory on success, NULL on failure
+ */
+void *
+rte_cvm_shared_malloc_biggest(int socket, unsigned int flags, unsigned int align,
+		bool contig);
+
 #ifdef __cplusplus
 }
 #endif

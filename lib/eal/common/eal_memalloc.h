@@ -13,7 +13,7 @@
  * Allocate segment of specified page size.
  */
 struct rte_memseg *
-eal_memalloc_alloc_seg(size_t page_sz, int socket);
+eal_memalloc_alloc_seg(size_t page_sz, int socket, enum rte_memory_type mem_type);
 
 /*
  * Allocate `n_segs` segments.
@@ -26,7 +26,7 @@ eal_memalloc_alloc_seg(size_t page_sz, int socket);
  */
 int
 eal_memalloc_alloc_seg_bulk(struct rte_memseg **ms, int n_segs, size_t page_sz,
-		int socket, bool exact);
+		int socket, bool exact, enum rte_memory_type mem_type);
 
 /*
  * Deallocate segment

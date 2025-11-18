@@ -679,6 +679,22 @@ eal_parse_args(int argc, char **argv)
 			internal_conf->force_socket_limits = 1;
 			break;
 
+		case OPT_CVM_SHARED_SOCKET_MEM_NUM:
+			if (eal_parse_socket_arg(optarg,
+					internal_conf->cvm_shared_socket_mem) < 0) {
+				EAL_LOG(ERR, "invalid parameters for --"
+						OPT_CVM_SHARED_SOCKET_MEM);
+				eal_usage(prgname);
+				ret = -1;
+				goto out;
+			}
+			internal_conf->cvm_shared_memory_enabled = true;
+			break;
+
+		case OPT_ENABLE_CVM_SHARED_MEMORY_NUM:
+			internal_conf->cvm_shared_memory_enabled = true;
+			break;
+
 		case OPT_VFIO_INTR_NUM:
 			if (eal_parse_vfio_intr(optarg) < 0) {
 				EAL_LOG(ERR, "invalid parameters for --"
