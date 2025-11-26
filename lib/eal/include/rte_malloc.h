@@ -622,21 +622,10 @@ rte_cvm_shared_calloc_socket(const char *type, size_t num, size_t size, unsigned
 	__rte_malloc __rte_dealloc_free;
 
 /**
- * Reallocate CVM shared memory (decrypted for DMA).
+ * Note: rte_realloc() now automatically detects memory type and works
+ * for both normal and CVM shared memory allocations. Use rte_realloc()
+ * for both types of memory.
  */
-void *
-rte_cvm_shared_realloc(void *ptr, size_t size, unsigned align)
-	__rte_alloc_size(2) __rte_alloc_align(3)
-	__rte_alloc_align(3) __rte_dealloc_free;
-
-/**
- * Reallocate CVM shared memory on specified NUMA socket (decrypted for DMA).
- */
-
-void *
-rte_cvm_shared_realloc_socket(void *ptr, size_t size, unsigned int align, int socket)
-	__rte_alloc_size(2) __rte_alloc_align(3)
-	__rte_malloc __rte_dealloc_free;
 
 /**
  * Free CVM shared memory.

@@ -158,6 +158,28 @@ rte_calloc(const char *type, size_t num, size_t size, unsigned align)
 	return rte_zmalloc(type, num * size, align);
 }
 
+/* Helper to determine memory type from a malloc element's heap */
+static inline enum rte_memory_type
+malloc_elem_get_memory_type(const struct malloc_elem *elem)
+{
+	struct rte_mem_config *mcfg = rte_eal_get_configuration()->mem_config;
+	const struct malloc_heap *heap = elem->heap;
+
+	/* Check if heap is in CVM shared malloc heaps array */
+	if (heap >= mcfg->cvm_shared_malloc_heaps &&
+	    heap < &mcfg->cvm_shared_malloc_heaps[RTE_MAX_HEAPS])
+		return RTE_MEMORY_TYPE_CVM_SHARED;
+
+	/* Check if heap is in normal malloc heaps array */
+	if (heap >= mcfg->malloc_heaps &&
+	    heap < &mcfg->malloc_heaps[RTE_MAX_HEAPS])
+		return RTE_MEMORY_TYPE_NORMAL;
+
+	/* Default to normal if unable to determine */
+	fprintf(stderr, "Unknown memory type for malloc element");
+	return RTE_MEMORY_TYPE_NORMAL;
+}
+
 /*
  * Resize allocated memory on specified heap.
  */
@@ -197,7 +219,14 @@ rte_realloc_socket(void *ptr, size_t size, unsigned int align, int socket)
 	 * or we have no room to expand,
 	 * so move the data.
 	 */
-	void *new_ptr = rte_malloc_socket(NULL, size, align, socket);
+	enum rte_memory_type mem_type = malloc_elem_get_memory_type(elem);
+	void *new_ptr;
+
+	if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+		new_ptr = rte_cvm_shared_malloc_socket(NULL, size, align, socket);
+	else
+		new_ptr = rte_malloc_socket(NULL, size, align, socket);
+
 	if (new_ptr == NULL)
 		return NULL;
 	/* elem: |pad|data_elem|data|trailer| */
@@ -734,59 +763,7 @@ rte_cvm_shared_calloc(const char *type, size_t num, size_t size,
 	return rte_cvm_shared_calloc_socket(type, num, size, align, SOCKET_ID_ANY);
 }
 
-void *
-rte_cvm_shared_realloc_socket(void *ptr, size_t size, unsigned align, int socket)
-{
-	size_t user_size;
 
-	if (ptr == NULL)
-		return rte_cvm_shared_malloc_socket(NULL, size, align, socket);
-
-	struct malloc_elem *elem = malloc_elem_from_data(ptr);
-	if (elem == NULL) {
-		EAL_LOG(ERR, "Error: memory corruption detected");
-		return NULL;
-	}
-
-	user_size = size;
-
-	size = RTE_CACHE_LINE_ROUNDUP(size), align = RTE_CACHE_LINE_ROUNDUP(align);
-
-	/* check requested socket id and alignment matches first, and if ok,
-	 * see if we can resize block
-	 */
-	if ((socket == SOCKET_ID_ANY ||
-	     (unsigned int)socket == elem->heap->socket_id) &&
-			RTE_PTR_ALIGN(ptr, align) == ptr &&
-			malloc_heap_resize(elem, size) == 0) {
-		rte_eal_trace_mem_realloc(size, align, socket, ptr);
-
-		asan_set_redzone(elem, user_size);
-
-		return ptr;
-	}
-
-	/* either requested socket id doesn't match, alignment is off
-	 * or we have no room to expand,
-	 * so move the data.
-	 */
-	void *new_ptr = rte_cvm_shared_malloc_socket(NULL, size, align, socket);
-	if (new_ptr == NULL)
-		return NULL;
-	/* elem: |pad|data_elem|data|trailer| */
-	const size_t old_size = old_malloc_size(elem);
-	rte_memcpy(new_ptr, ptr, old_size < size ? old_size : size);
-	rte_free(ptr);
-
-	rte_eal_trace_mem_realloc(size, align, socket, new_ptr);
-	return new_ptr;
-}
-
-void *
-rte_cvm_shared_realloc(void *ptr, size_t size, unsigned align)
-{
-	return rte_cvm_shared_realloc_socket(ptr, size, align, SOCKET_ID_ANY);
-}
 
 void
 rte_cvm_shared_free(void *ptr)

@@ -319,6 +319,42 @@ int
 rte_memseg_list_walk_thread_unsafe(rte_memseg_list_walk_t func, void *arg);
 
 /**
+ * Walk all memsegs from the CVM shared memory list.
+ *
+ * @note This function read-locks the memory hotplug subsystem, and thus cannot
+ *       be used within memory-related callback functions.
+ *
+ * @param func
+ *   Iterator function
+ * @param arg
+ *   Argument passed to iterator
+ * @return
+ *   0 if walked over the entire list
+ *   1 if stopped by the user
+ *   -1 if user function reported error
+ */
+int
+rte_memseg_walk_cvm_shared(rte_memseg_walk_t func, void *arg);
+
+/**
+ * Walk all memsegs from the CVM shared memory list without performing any locking.
+ *
+ * @note This function does not perform any locking, and is only safe to call
+ *       from within memory-related callback functions.
+ *
+ * @param func
+ *   Iterator function
+ * @param arg
+ *   Argument passed to iterator
+ * @return
+ *   0 if walked over the entire list
+ *   1 if stopped by the user
+ *   -1 if user function reported error
+ */
+int
+rte_memseg_walk_cvm_shared_thread_unsafe(rte_memseg_walk_t func, void *arg);
+
+/**
  * Return file descriptor associated with a particular memseg (if available).
  *
  * @note This function read-locks the memory hotplug subsystem, and thus cannot

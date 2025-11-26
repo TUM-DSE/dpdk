@@ -1403,17 +1403,37 @@ type1_map(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
 		void *arg)
 {
 	int *vfio_container_fd = arg;
+	int ret;
 
 	/* skip external memory that isn't a heap */
-	if (msl->external && !msl->heap)
+	if (msl->external && !msl->heap) {
+		EAL_LOG(DEBUG,
+			"Skipping external non-heap memory segment at %p, size 0x%zx",
+			ms->addr, ms->len);
 		return 0;
+	}
 
 	/* skip any segments with invalid IOVA addresses */
-	if (ms->iova == RTE_BAD_IOVA)
+	if (ms->iova == RTE_BAD_IOVA) {
+		EAL_LOG(DEBUG,
+			"Skipping memory segment at %p with invalid IOVA, size 0x%zx",
+			ms->addr, ms->len);
 		return 0;
+	}
 
-	return vfio_type1_dma_mem_map(*vfio_container_fd, ms->addr_64, ms->iova,
+	ret = vfio_type1_dma_mem_map(*vfio_container_fd, ms->addr_64, ms->iova,
 			ms->len, 1);
+	if (ret == 0) {
+		EAL_LOG(DEBUG,
+			"DMA mapping successful: vaddr=%p, iova=0x%"PRIx64", size=0x%zx",
+			ms->addr, ms->iova, ms->len);
+	} else {
+		EAL_LOG(ERR,
+			"DMA mapping failed for segment at vaddr=%p, iova=0x%"PRIx64", size=0x%zx",
+			ms->addr, ms->iova, ms->len);
+	}
+
+	return ret;
 }
 
 static int
@@ -1476,6 +1496,13 @@ vfio_type1_dma_mem_map(int vfio_container_fd, uint64_t vaddr, uint64_t iova,
 static int
 vfio_type1_dma_map(int vfio_container_fd)
 {
+	int ret = 0;
+	ret = rte_memseg_walk_cvm_shared(type1_map, &vfio_container_fd);
+	if (ret < 0) {
+		EAL_LOG(ERR, "Failed to walk CVM shared memory segments");
+		return -1;
+	}
+
 	return rte_memseg_walk(type1_map, &vfio_container_fd);
 }
 

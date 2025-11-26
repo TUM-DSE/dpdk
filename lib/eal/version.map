@@ -187,8 +187,6 @@ DPDK_25 {
 	rte_cvm_shared_zmalloc_socket;
 	rte_cvm_shared_calloc;
 	rte_cvm_shared_calloc_socket;
-	rte_cvm_shared_realloc;
-	rte_cvm_shared_realloc_socket;
 	rte_cvm_shared_free;
 	rte_cvm_shared_malloc_biggest;
 	rte_mcfg_get_single_file_segments;
@@ -231,6 +229,8 @@ DPDK_25 {
 	rte_memseg_list_walk;
 	rte_memseg_list_walk_thread_unsafe;
 	rte_memseg_walk;
+	rte_memseg_walk_cvm_shared;
+	rte_memseg_walk_cvm_shared_thread_unsafe;
 	rte_memseg_walk_thread_unsafe;
 	rte_memzone_dump;
 	rte_memzone_free;

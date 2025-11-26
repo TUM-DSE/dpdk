@@ -838,6 +838,25 @@ rte_memseg_walk(rte_memseg_walk_t func, void *arg)
 	return ret;
 }
 
+int
+rte_memseg_walk_cvm_shared_thread_unsafe(rte_memseg_walk_t func, void *arg)
+{
+	return rte_memseg_walk_thread_unsafe_select(func, arg, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+int
+rte_memseg_walk_cvm_shared(rte_memseg_walk_t func, void *arg)
+{
+	int ret = 0;
+
+	/* do not allow allocations/frees/init while we iterate */
+	rte_mcfg_mem_read_lock();
+	ret = rte_memseg_walk_cvm_shared_thread_unsafe(func, arg);
+	rte_mcfg_mem_read_unlock();
+
+	return ret;
+}
+
 /* Internal parametrized version that supports both regular and CVM shared memsegs */
 int
 rte_memseg_list_walk_thread_unsafe_select(rte_memseg_list_walk_t func, void *arg,
