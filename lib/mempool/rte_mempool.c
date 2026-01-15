@@ -270,6 +270,15 @@ rte_mempool_memchunk_mz_free(__rte_unused struct rte_mempool_memhdr *memhdr,
 	rte_memzone_free(mz);
 }
 
+/* free a memchunk allocated with rte_cvm_shared_memzone_reserve() */
+static void
+rte_mempool_memchunk_mz_cvm_shared_free(__rte_unused struct rte_mempool_memhdr *memhdr,
+	void *opaque)
+{
+	const struct rte_memzone *mz = opaque;
+	rte_cvm_shared_memzone_free(mz);
+}
+
 /* Free memory chunks used by a mempool. Objects must be in pool */
 static void
 rte_mempool_free_memchunks(struct rte_mempool *mp)
@@ -575,9 +584,15 @@ rte_mempool_populate_default(struct rte_mempool *mp)
 
 		/* Allocate a memzone, retrying with a smaller area on ENOMEM */
 		do {
-			mz = rte_memzone_reserve_aligned(mz_name,
-				RTE_MIN((size_t)mem_size, max_alloc_size),
-				mp->socket_id, mz_flags, align);
+			/* Use appropriate memzone allocation based on memory type */
+			if (mp->mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+				mz = rte_cvm_shared_memzone_reserve_aligned(mz_name,
+					RTE_MIN((size_t)mem_size, max_alloc_size),
+					mp->socket_id, mz_flags, align);
+			else
+				mz = rte_memzone_reserve_aligned(mz_name,
+					RTE_MIN((size_t)mem_size, max_alloc_size),
+					mp->socket_id, mz_flags, align);
 
 			if (mz != NULL || rte_errno != ENOMEM)
 				break;
@@ -596,16 +611,30 @@ rte_mempool_populate_default(struct rte_mempool *mp)
 		else
 			iova = RTE_BAD_IOVA;
 
-		if (pg_sz == 0 || (mz_flags & RTE_MEMZONE_IOVA_CONTIG))
-			ret = rte_mempool_populate_iova(mp, mz->addr,
-				iova, mz->len,
-				rte_mempool_memchunk_mz_free,
-				(void *)(uintptr_t)mz);
-		else
-			ret = rte_mempool_populate_virt(mp, mz->addr,
-				mz->len, pg_sz,
-				rte_mempool_memchunk_mz_free,
-				(void *)(uintptr_t)mz);
+		/* Use appropriate free callback based on memory type */
+		if (pg_sz == 0 || (mz_flags & RTE_MEMZONE_IOVA_CONTIG)) {
+			if (mp->mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+				ret = rte_mempool_populate_iova(mp, mz->addr,
+					iova, mz->len,
+					rte_mempool_memchunk_mz_cvm_shared_free,
+					(void *)(uintptr_t)mz);
+			else
+				ret = rte_mempool_populate_iova(mp, mz->addr,
+					iova, mz->len,
+					rte_mempool_memchunk_mz_free,
+					(void *)(uintptr_t)mz);
+		} else {
+			if (mp->mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+				ret = rte_mempool_populate_virt(mp, mz->addr,
+					mz->len, pg_sz,
+					rte_mempool_memchunk_mz_cvm_shared_free,
+					(void *)(uintptr_t)mz);
+			else
+				ret = rte_mempool_populate_virt(mp, mz->addr,
+					mz->len, pg_sz,
+					rte_mempool_memchunk_mz_free,
+					(void *)(uintptr_t)mz);
+		}
 		if (ret == 0) /* should not happen */
 			ret = -ENOBUFS;
 		if (ret < 0) {
@@ -740,7 +769,12 @@ rte_mempool_free(struct rte_mempool *mp)
 	rte_mempool_trace_free(mp);
 	rte_mempool_free_memchunks(mp);
 	rte_mempool_ops_free(mp);
-	rte_memzone_free(mp->mz);
+
+	/* Use appropriate free function based on memory type */
+	if (mp->mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+		rte_cvm_shared_memzone_free(mp->mz);
+	else
+		rte_memzone_free(mp->mz);
 }
 
 static void
@@ -797,11 +831,11 @@ rte_mempool_cache_free(struct rte_mempool_cache *cache)
 	rte_free(cache);
 }
 
-/* create an empty mempool */
-struct rte_mempool *
-rte_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
+/* internal helper to create an empty mempool with specified memory type */
+static struct rte_mempool *
+mempool_create_empty_internal(const char *name, unsigned n, unsigned elt_size,
 	unsigned cache_size, unsigned private_data_size,
-	int socket_id, unsigned flags)
+	int socket_id, unsigned flags, enum rte_memory_type mem_type)
 {
 	char mz_name[RTE_MEMZONE_NAMESIZE];
 	struct rte_mempool_list *mempool_list;
@@ -890,7 +924,12 @@ rte_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
 		goto exit_unlock;
 	}
 
-	mz = rte_memzone_reserve(mz_name, mempool_size, socket_id, mz_flags);
+	/* allocate memzone using appropriate function based on memory type */
+	if (mem_type == RTE_MEMORY_TYPE_CVM_SHARED)
+		mz = rte_cvm_shared_memzone_reserve(mz_name, mempool_size, socket_id, mz_flags);
+	else
+		mz = rte_memzone_reserve(mz_name, mempool_size, socket_id, mz_flags);
+
 	if (mz == NULL)
 		goto exit_unlock;
 
@@ -906,6 +945,7 @@ rte_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
 	mp->size = n;
 	mp->flags = flags;
 	mp->socket_id = socket_id;
+	mp->mem_type = mem_type;
 	mp->elt_size = objsz.elt_size;
 	mp->header_size = objsz.header_size;
 	mp->trailer_size = objsz.trailer_size;
@@ -965,6 +1005,16 @@ exit_unlock:
 	return NULL;
 }
 
+/* create an empty mempool */
+struct rte_mempool *
+rte_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
+	unsigned cache_size, unsigned private_data_size,
+	int socket_id, unsigned flags)
+{
+	return mempool_create_empty_internal(name, n, elt_size, cache_size,
+		private_data_size, socket_id, flags, RTE_MEMORY_TYPE_NORMAL);
+}
+
 /* create the mempool */
 struct rte_mempool *
 rte_mempool_create(const char *name, unsigned n, unsigned elt_size,
@@ -977,6 +1027,60 @@ rte_mempool_create(const char *name, unsigned n, unsigned elt_size,
 
 	mp = rte_mempool_create_empty(name, n, elt_size, cache_size,
 		private_data_size, socket_id, flags);
+	if (mp == NULL)
+		return NULL;
+
+	/* call the mempool priv initializer */
+	if (mp_init)
+		mp_init(mp, mp_init_arg);
+
+	if (rte_mempool_populate_default(mp) < 0)
+		goto fail;
+
+	/* call the object initializers */
+	if (obj_init)
+		rte_mempool_obj_iter(mp, obj_init, obj_init_arg);
+
+	rte_mempool_trace_create(name, n, elt_size, cache_size,
+		private_data_size, mp_init, mp_init_arg, obj_init,
+		obj_init_arg, flags, mp);
+	return mp;
+
+ fail:
+	rte_mempool_free(mp);
+	return NULL;
+}
+
+/* create an empty CVM-shared mempool */
+struct rte_mempool *
+rte_cvm_shared_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
+	unsigned cache_size, unsigned private_data_size,
+	int socket_id, unsigned flags)
+{
+	return mempool_create_empty_internal(name, n, elt_size, cache_size,
+		private_data_size, socket_id, flags, RTE_MEMORY_TYPE_CVM_SHARED);
+}
+
+/* populate CVM-shared mempool with default memory */
+int
+rte_cvm_shared_mempool_populate_default(struct rte_mempool *mp)
+{
+	/* Use memory type from mempool structure */
+	return rte_mempool_populate_default(mp);
+}
+
+/* create the CVM-shared mempool */
+struct rte_mempool *
+rte_cvm_shared_mempool_create(const char *name, unsigned n, unsigned elt_size,
+	unsigned cache_size, unsigned private_data_size,
+	rte_mempool_ctor_t *mp_init, void *mp_init_arg,
+	rte_mempool_obj_cb_t *obj_init, void *obj_init_arg,
+	int socket_id, unsigned flags)
+{
+	struct rte_mempool *mp;
+
+	mp = rte_cvm_shared_mempool_create_empty(name, n, elt_size,
+		cache_size, private_data_size, socket_id, flags);
 	if (mp == NULL)
 		return NULL;
 

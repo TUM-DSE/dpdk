@@ -49,6 +49,7 @@
 #include <rte_ring.h>
 #include <rte_memcpy.h>
 #include <rte_common.h>
+#include <rte_memory.h>
 
 #include "rte_mempool_trace_fp.h"
 
@@ -237,6 +238,7 @@ struct __rte_cache_aligned rte_mempool {
 	const struct rte_memzone *mz;    /**< Memzone where pool is alloc'd. */
 	unsigned int flags;              /**< Flags of the mempool. */
 	int socket_id;                   /**< Socket id passed at create. */
+	enum rte_memory_type mem_type;   /**< Memory type (normal or CVM-shared) for DMA compatibility. */
 	uint32_t size;                   /**< Max size of the mempool. */
 	uint32_t cache_size;
 	/**< Size of per-lcore default local cache. */
@@ -1151,6 +1153,65 @@ rte_mempool_create_empty(const char *name, unsigned int n, unsigned int elt_size
 			 unsigned int cache_size, unsigned int private_data_size,
 			 int socket_id, unsigned int flags)
 		__rte_malloc __rte_dealloc(rte_mempool_free, 1);
+
+/**
+ * Create a CVM-shared mempool
+ *
+ * Creates and initializes a mempool in CVM-shared (decrypted) memory.
+ * The mempool objects will be accessible for DMA operations in AMD SEV-SNP
+ * confidential VMs. All parameters are identical to rte_mempool_create().
+ *
+ * @see rte_mempool_create() for parameter documentation
+ * @return
+ *   Pointer to the new allocated mempool on success, NULL on error
+ *   with rte_errno set appropriately.
+ */
+__rte_experimental
+struct rte_mempool *
+rte_cvm_shared_mempool_create(const char *name, unsigned n, unsigned elt_size,
+			      unsigned cache_size, unsigned private_data_size,
+			      rte_mempool_ctor_t *mp_init, void *mp_init_arg,
+			      rte_mempool_obj_cb_t *obj_init, void *obj_init_arg,
+			      int socket_id, unsigned int flags)
+	__rte_malloc __rte_dealloc(rte_mempool_free, 1);
+
+/**
+ * Create an empty CVM-shared mempool
+ *
+ * Creates a mempool structure in CVM-shared memory without populating it.
+ * Use rte_cvm_shared_mempool_populate_default() or rte_mempool_populate_*()
+ * to add memory chunks. All parameters are identical to rte_mempool_create_empty().
+ *
+ * @see rte_mempool_create_empty() for parameter documentation
+ * @return
+ *   Pointer to the new allocated mempool on success, NULL on error
+ *   with rte_errno set appropriately.
+ */
+__rte_experimental
+struct rte_mempool *
+rte_cvm_shared_mempool_create_empty(const char *name, unsigned int n,
+				    unsigned int elt_size, unsigned int cache_size,
+				    unsigned int private_data_size,
+				    int socket_id, unsigned int flags)
+	__rte_malloc __rte_dealloc(rte_mempool_free, 1);
+
+/**
+ * Populate CVM-shared mempool with default memory
+ *
+ * Adds CVM-shared memory chunks to the mempool using memzone allocation.
+ * The allocated memory will be suitable for DMA operations in confidential VMs.
+ * Note: This function works with mempools created with either
+ * rte_cvm_shared_mempool_create_empty() or rte_mempool_create_empty(),
+ * using the memory type specified during mempool creation.
+ *
+ * @param mp
+ *   Pointer to the mempool structure.
+ * @return
+ *   Number of objects added on success.
+ *   On error, a negative errno is returned.
+ */
+__rte_experimental
+int rte_cvm_shared_mempool_populate_default(struct rte_mempool *mp);
 
 /**
  * Add physically contiguous memory for objects in the pool at init

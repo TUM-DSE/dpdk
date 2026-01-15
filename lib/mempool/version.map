@@ -54,6 +54,11 @@ EXPERIMENTAL {
 	# added in 24.07
 	rte_mempool_get_mem_range;
 	rte_mempool_get_obj_alignment;
+
+	# added in 26.01
+	rte_cvm_shared_mempool_create;
+	rte_cvm_shared_mempool_create_empty;
+	rte_cvm_shared_mempool_populate_default;
 };
 
 INTERNAL {
